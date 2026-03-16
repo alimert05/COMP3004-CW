@@ -133,9 +133,9 @@ while running:
     fire_system.step()
     tick += 1
 
-    # Update civilians — move them, bounce off walls
+    # Update civilians — move them, avoid smoke/fire, bounce off walls
     for civ in civilians:
-        civ.update(env)
+        civ.update(env, smoke_system, fire_system)
 
     # Draw map
     screen.blit(map_surface, (0, 0))

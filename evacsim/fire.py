@@ -42,5 +42,12 @@ class FireSystem:
         for r, c in self._fire_cells:
             self.density[r, c] = 1.0
 
+    def get_density_at(self, x: float, y: float) -> float:
+        """Get fire density at a world position."""
+        row, col = self.env.world_to_grid(x, y)
+        if 0 <= row < self.env.rows and 0 <= col < self.env.cols:
+            return float(self.density[row, col])
+        return 0.0
+
     def get_density_grid(self) -> np.ndarray:
         return self.density.copy()
