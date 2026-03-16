@@ -5,6 +5,7 @@ from config import SimConfig
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
+from evacsim.civilian import spawn_civilians
 
 
 # =====================================================================
@@ -77,6 +78,16 @@ fire_system = FireSystem(env, spread_rate=0.005)
 
 
 # =====================================================================
+# STEP 5b: SPAWN CIVILIANS
+# =====================================================================
+
+civilians = spawn_civilians(env, n=30, speed=1.5, seed=99)
+
+# The circle radius in pixels (for drawing)
+CIV_RADIUS = max(4, CELL // 4)
+
+
+# =====================================================================
 # STEP 6: CREATE THE WINDOW
 # =====================================================================
 
@@ -117,10 +128,14 @@ while running:
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             running = False
 
-    # Update
+    # Update smoke and fire
     smoke_system.step()
     fire_system.step()
     tick += 1
+
+    # Update civilians — move them, bounce off walls
+    for civ in civilians:
+        civ.update(env)
 
     # Draw map
     screen.blit(map_surface, (0, 0))
@@ -147,6 +162,15 @@ while running:
                 frame.set_alpha(alpha)
                 screen.blit(frame, (c * CELL, r * CELL))
 
+    # Draw civilians as blue circles
+    for civ in civilians:
+        # Convert world position to screen pixels
+        sx = int(civ.pos[0] * SCALE)
+        sy = int(civ.pos[1] * SCALE)
+        pygame.draw.circle(screen, (50, 120, 255), (sx, sy), CIV_RADIUS)
+        # Black outline so they're visible on any background
+        pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
+
     # Advance animation
     frame_timer += 1
     if frame_timer >= FRAME_DELAY:
@@ -157,7 +181,7 @@ while running:
     # HUD
     smoke_cells = int((smoke_grid > 0.02).sum())
     fire_cells = int((fire_grid > 0.1).sum())
-    hud_text = f"Tick: {tick}   Smoke: {smoke_cells}   Fire: {fire_cells}"
+    hud_text = f"Tick: {tick}   Civilians: {len(civilians)}   Smoke: {smoke_cells}   Fire: {fire_cells}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface((label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA)
     bg.fill((0, 0, 0, 160))

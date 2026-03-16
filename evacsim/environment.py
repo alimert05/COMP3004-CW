@@ -142,6 +142,48 @@ class Environment:
         row = max(0, min(int(y / self.cell_size), self.rows - 1))
         return row, col
 
+    def spawn_positions(self, n: int, seed: int = 0) -> list[tuple[float, float]]:
+        """Pick n random FLOOR cells and return their world-coordinate centres.
+
+        Rules:
+          - Only FLOOR cells (not walls, not exits, not fire sources)
+          - At least 3 cells away from any exit (so civilians don't start at the door)
+          - Each cell is used at most once (no two civilians in the same cell)
+
+        Returns a list of (x, y) world positions, one per civilian.
+        """
+        rng = np.random.default_rng(seed)
+
+        # Find all floor cells
+        floor_cells = list(zip(*np.where(self.grid == CellType.FLOOR)))
+
+        # Remove cells too close to exits (within 3 cells Manhattan distance)
+        exit_grid = [self.world_to_grid(ex, ey) for ex, ey in self.exits]
+        safe_cells = []
+        for r, c in floor_cells:
+            too_close = False
+            for er, ec in exit_grid:
+                if abs(r - er) + abs(c - ec) < 4:
+                    too_close = True
+                    break
+            # Also skip fire source cells
+            if (r, c) in self.fire_sources:
+                too_close = True
+            if not too_close:
+                safe_cells.append((r, c))
+
+        # Pick n unique cells at random
+        n = min(n, len(safe_cells))
+        indices = rng.choice(len(safe_cells), size=n, replace=False)
+
+        # Convert to world coordinates (centre of each cell)
+        positions = []
+        for idx in indices:
+            r, c = safe_cells[idx]
+            positions.append(self.grid_to_world(r, c))
+
+        return positions
+
     def is_walkable(self, x: float, y: float) -> bool:
         """Check if an agent can stand at this world position.
 
