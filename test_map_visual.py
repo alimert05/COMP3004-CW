@@ -1,11 +1,20 @@
 import sys
 import pygame
 from PIL import Image
-from config import SimConfig
+from config import SimConfig, CIVILIAN_NUMBER
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
-from evacsim.civilian import spawn_civilians
+from evacsim.civilian import (
+    spawn_civilians,
+    IDLE,
+    WANDERING,
+    WALL_FOLLOWING,
+    FOLLOWING,
+    MOVING_TO_EXIT,
+    ESCAPED,
+    DEAD,
+)
 
 
 # =====================================================================
@@ -38,7 +47,9 @@ WIN_H = env.rows * CELL
 pygame.init()
 
 wall_tile = pygame.transform.scale(pygame.image.load("assets/wall6.png"), (CELL, CELL))
-floor_tile = pygame.transform.scale(pygame.image.load("assets/floor3.png"), (CELL, CELL))
+floor_tile = pygame.transform.scale(
+    pygame.image.load("assets/floor3.png"), (CELL, CELL)
+)
 door_tile = pygame.transform.scale(pygame.image.load("assets/door2.png"), (CELL, CELL))
 
 TILES = {
@@ -51,6 +62,7 @@ TILES = {
 # =====================================================================
 # STEP 4: LOAD GIF FRAMES
 # =====================================================================
+
 
 def load_gif_frames(path, size):
     frames = []
@@ -81,7 +93,7 @@ fire_system = FireSystem(env, spread_rate=0.005)
 # STEP 5b: SPAWN CIVILIANS
 # =====================================================================
 
-civilians = spawn_civilians(env, n=30, speed=1.5, seed=99)
+civilians = spawn_civilians(env, n=CIVILIAN_NUMBER, speed=1.5, seed=99)
 
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)
@@ -119,23 +131,32 @@ smoke_frame_idx = 0
 frame_timer = 0
 FRAME_DELAY = 4
 tick = 0
+sim_speed = 1  # 1x, 2x, 5x, 10x — press 1/2/5/0 to change
 
 running = True
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            running = False
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                running = False
+            elif event.key == pygame.K_1:
+                sim_speed = 1
+            elif event.key == pygame.K_2:
+                sim_speed = 2
+            elif event.key == pygame.K_5:
+                sim_speed = 5
+            elif event.key == pygame.K_0:
+                sim_speed = 10
 
-    # Update smoke and fire
-    smoke_system.step()
-    fire_system.step()
-    tick += 1
-
-    # Update civilians — move them, avoid smoke/fire, bounce off walls
-    for civ in civilians:
-        civ.update(env, smoke_system, fire_system)
+    # Run multiple simulation steps per frame for speed-up
+    for _ in range(sim_speed):
+        smoke_system.step()
+        fire_system.step()
+        tick += 1
+        for civ in civilians:
+            civ.update(env, smoke_system, fire_system, civilians)
 
     # Draw map
     screen.blit(map_surface, (0, 0))
@@ -162,13 +183,25 @@ while running:
                 frame.set_alpha(alpha)
                 screen.blit(frame, (c * CELL, r * CELL))
 
-    # Draw civilians as blue circles
+    # Draw civilians — colour by state, skip escaped
     for civ in civilians:
-        # Convert world position to screen pixels
+        if civ.state == ESCAPED:
+            continue
         sx = int(civ.pos[0] * SCALE)
         sy = int(civ.pos[1] * SCALE)
-        pygame.draw.circle(screen, (50, 120, 255), (sx, sy), CIV_RADIUS)
-        # Black outline so they're visible on any background
+        if civ.state == DEAD:
+            colour = (200, 30, 30)  # red — dead
+        elif civ.state == MOVING_TO_EXIT:
+            colour = (50, 220, 50)  # green — heading to exit
+        elif civ.state == FOLLOWING:
+            colour = (255, 200, 50)  # yellow — following someone
+        elif civ.state == WALL_FOLLOWING:
+            colour = (200, 100, 255)  # purple — blind, following wall
+        elif civ.state == IDLE:
+            colour = (180, 180, 180)  # grey — unaware
+        else:
+            colour = (50, 120, 255)  # blue — wandering
+        pygame.draw.circle(screen, colour, (sx, sy), CIV_RADIUS)
         pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
 
     # Advance animation
@@ -181,9 +214,18 @@ while running:
     # HUD
     smoke_cells = int((smoke_grid > 0.02).sum())
     fire_cells = int((fire_grid > 0.1).sum())
-    hud_text = f"Tick: {tick}   Civilians: {len(civilians)}   Smoke: {smoke_cells}   Fire: {fire_cells}"
+    idle = sum(1 for c in civilians if c.state == IDLE)
+    wandering = sum(1 for c in civilians if c.state == WANDERING)
+    wall_f = sum(1 for c in civilians if c.state == WALL_FOLLOWING)
+    following = sum(1 for c in civilians if c.state == FOLLOWING)
+    to_exit = sum(1 for c in civilians if c.state == MOVING_TO_EXIT)
+    escaped = sum(1 for c in civilians if c.state == ESCAPED)
+    dead = sum(1 for c in civilians if c.state == DEAD)
+    hud_text = f"T:{tick}  Speed:{sim_speed}x  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
     label = font.render(hud_text, True, (255, 255, 255))
-    bg = pygame.Surface((label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA)
+    bg = pygame.Surface(
+        (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA
+    )
     bg.fill((0, 0, 0, 160))
     screen.blit(bg, (5, 5))
     screen.blit(label, (10, 7))

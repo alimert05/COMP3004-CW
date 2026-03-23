@@ -12,3 +12,6 @@ class SimConfig:
     # How big each grid cell is in "world units"
     # Our grid is like graph paper — this says each square is 10x10 units
     cell_size: float = 10.0
+
+
+CIVILIAN_NUMBER = 50
