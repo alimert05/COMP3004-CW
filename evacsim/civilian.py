@@ -14,6 +14,7 @@ import numpy as np
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
+from evacsim.guide import bfs_path
 
 
 # Civilian states
@@ -42,6 +43,9 @@ class Civilian:
 
         # Target exit position
         self._target_exit = None
+
+        # BFS waypoints to exit (computed when exit is found)
+        self._waypoints = []
 
         # Who we're following (another Civilian reference)
         self._follow_target = None
@@ -122,8 +126,7 @@ class Civilian:
         if effective_vision > 0 and self.state not in (MOVING_TO_EXIT, ESCAPED, DEAD):
             nearest_exit, nearest_dist = self._find_nearest_exit(env, effective_vision)
             if nearest_exit is not None:
-                self._target_exit = nearest_exit
-                self.state = MOVING_TO_EXIT
+                self._set_exit_target(env, nearest_exit)
 
         # --- Check for herding (see another civilian heading to exit?) ---
         if effective_vision > 0 and self.state in (WANDERING, WALL_FOLLOWING):
@@ -134,15 +137,35 @@ class Civilian:
 
         # --- Decide what to do based on state ---
         if self.state == MOVING_TO_EXIT and self._target_exit is not None:
-            diff = np.array(self._target_exit) - self.pos
-            dist = np.linalg.norm(diff)
-
-            if dist < env.cell_size:
+            # Check if we reached the exit
+            diff_exit = np.array(self._target_exit) - self.pos
+            dist_exit = np.linalg.norm(diff_exit)
+            if dist_exit < env.cell_size:
                 self.state = ESCAPED
                 return
+
+            # Follow BFS waypoints
+            if self._waypoints:
+                target = self._waypoints[0]
+                diff = target - self.pos
+                dist = np.linalg.norm(diff)
+
+                if dist < env.cell_size * 0.5:
+                    # Reached waypoint, move to next
+                    self._waypoints.pop(0)
+                    if self._waypoints:
+                        target = self._waypoints[0]
+                        diff = target - self.pos
+                        dist = np.linalg.norm(diff)
+
+                if dist > 0:
+                    direction = diff / dist
+                    self.vel = direction * current_speed
             else:
-                direction = diff / dist
-                self.vel = direction * current_speed
+                # No waypoints left, walk directly to exit
+                if dist_exit > 0:
+                    direction = diff_exit / dist_exit
+                    self.vel = direction * current_speed
 
         elif self.state == FOLLOWING and self._follow_target is not None:
             # Follow the leader civilian
@@ -163,8 +186,7 @@ class Civilian:
                 if effective_vision > 0:
                     nearest_exit, _ = self._find_nearest_exit(env, effective_vision)
                     if nearest_exit is not None:
-                        self._target_exit = nearest_exit
-                        self.state = MOVING_TO_EXIT
+                        self._set_exit_target(env, nearest_exit)
 
         elif self.state == WALL_FOLLOWING:
             self._do_wall_follow(env, current_speed)
@@ -219,6 +241,12 @@ class Civilian:
             # Really stuck — try hard to find an opening
             self._pick_open_direction(env, current_speed)
             self._stuck_ticks = 0
+
+    def _set_exit_target(self, env: Environment, exit_pos: tuple) -> None:
+        """Set exit target and compute BFS path to it."""
+        self._target_exit = exit_pos
+        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
+        self.state = MOVING_TO_EXIT
 
     def _flee_from_danger(self, env: Environment, smoke: SmokeSystem,
                           fire: FireSystem, current_speed: float) -> None:

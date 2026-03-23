@@ -15,6 +15,7 @@ from evacsim.civilian import (
     ESCAPED,
     DEAD,
 )
+from evacsim.guide import spawn_beacon_guides
 
 
 # =====================================================================
@@ -95,8 +96,12 @@ fire_system = FireSystem(env, spread_rate=0.005)
 
 civilians = spawn_civilians(env, n=CIVILIAN_NUMBER, speed=1.5, seed=99)
 
+# Spawn beacon guides — 1 per exit (or adjust count)
+guides = spawn_beacon_guides(env, n_guides=len(env.exits), speed=2.0, seed=77)
+
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)
+GUIDE_RADIUS = max(6, CELL // 3)
 
 
 # =====================================================================
@@ -155,6 +160,9 @@ while running:
         smoke_system.step()
         fire_system.step()
         tick += 1
+        # Update guides first (they broadcast to civilians)
+        for guide in guides:
+            guide.update(env, smoke_system, fire_system, civilians)
         for civ in civilians:
             civ.update(env, smoke_system, fire_system, civilians)
 
@@ -204,6 +212,23 @@ while running:
         pygame.draw.circle(screen, colour, (sx, sy), CIV_RADIUS)
         pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
 
+    # Draw guides — orange diamonds, larger than civilians
+    for guide in guides:
+        if not guide.alive:
+            continue
+        gx = int(guide.pos[0] * SCALE)
+        gy = int(guide.pos[1] * SCALE)
+        r = GUIDE_RADIUS
+        # Draw diamond shape
+        points = [(gx, gy - r), (gx + r, gy), (gx, gy + r), (gx - r, gy)]
+        pygame.draw.polygon(screen, (255, 140, 0), points)       # orange fill
+        pygame.draw.polygon(screen, (0, 0, 0), points, 2)        # black outline
+        # Draw broadcast radius circle (faint)
+        brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
+        broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
+        pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
+        screen.blit(broadcast_surf, (gx - brad, gy - brad))
+
     # Advance animation
     frame_timer += 1
     if frame_timer >= FRAME_DELAY:
@@ -221,7 +246,8 @@ while running:
     to_exit = sum(1 for c in civilians if c.state == MOVING_TO_EXIT)
     escaped = sum(1 for c in civilians if c.state == ESCAPED)
     dead = sum(1 for c in civilians if c.state == DEAD)
-    hud_text = f"T:{tick}  Speed:{sim_speed}x  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
+    guides_alive = sum(1 for g in guides if g.alive)
+    hud_text = f"T:{tick}  {sim_speed}x  Guides:{guides_alive}  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA
