@@ -11,6 +11,7 @@ Based on evacuation research findings:
 """
 
 import numpy as np
+from collections import deque
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
@@ -19,12 +20,13 @@ from evacsim.guide import bfs_path
 
 # Civilian states
 IDLE = 0           # Standing still, unaware of danger
-WANDERING = 1      # Aware of danger, moving randomly
-WALL_FOLLOWING = 2 # In smoke, can't see, following a wall
-FOLLOWING = 3      # Following another civilian who knows the way
-MOVING_TO_EXIT = 4 # Spotted an exit, heading straight for it
-ESCAPED = 5
-DEAD = 6
+FLEEING_ROOM = 1   # Detected danger, pathfinding to nearest doorway
+WANDERING = 2      # In corridor, moving randomly
+WALL_FOLLOWING = 3 # In smoke, can't see, following a wall
+FOLLOWING = 4      # Following another civilian who knows the way
+MOVING_TO_EXIT = 5 # Spotted an exit, heading straight for it
+ESCAPED = 6
+DEAD = 7
 
 
 class Civilian:
@@ -57,6 +59,9 @@ class Civilian:
         self._prev_pos = self.pos.copy()
         self._stuck_ticks = 0
 
+        # Direction cooldown — stick with chosen direction for a few ticks
+        self._direction_cooldown = 0
+
         # Smoke damage
         self._smoke_damage = 0.0
         self._max_smoke_damage = 150.0
@@ -79,11 +84,16 @@ class Civilian:
         # --- IDLE: stay still until we sense danger ---
         if self.state == IDLE:
             if in_fire or in_smoke or self._sense_nearby_danger(env, smoke, fire):
-                self.state = WANDERING
-                # Flee AWAY from the danger, not random
-                self._flee_from_danger(env, smoke, fire, self.speed)
+                # Danger detected — find doorway and flee the room
+                doorway = self._find_nearest_doorway(env)
+                if doorway is not None:
+                    self._waypoints = bfs_path(env, self.pos, doorway)
+                    self.state = FLEEING_ROOM
+                else:
+                    # Already in corridor or can't find doorway — just wander
+                    self.state = WANDERING
+                    self._flee_from_danger(env, smoke, fire, self.speed)
             else:
-                # Safe — remember this as safe spot
                 self._last_safe_pos = self.pos.copy()
                 return  # Stay still
 
@@ -136,7 +146,30 @@ class Civilian:
                 self.state = FOLLOWING
 
         # --- Decide what to do based on state ---
-        if self.state == MOVING_TO_EXIT and self._target_exit is not None:
+
+        # FLEEING_ROOM: follow BFS waypoints to doorway, then switch to WANDERING
+        if self.state == FLEEING_ROOM:
+            if self._waypoints:
+                target = self._waypoints[0]
+                diff = target - self.pos
+                dist = np.linalg.norm(diff)
+
+                if dist < env.cell_size * 0.5:
+                    self._waypoints.pop(0)
+                    if self._waypoints:
+                        target = self._waypoints[0]
+                        diff = target - self.pos
+                        dist = np.linalg.norm(diff)
+
+                if dist > 0:
+                    direction = diff / dist
+                    self.vel = direction * current_speed
+            else:
+                # Reached doorway — now wander in the corridor
+                self.state = WANDERING
+                self._flee_from_danger(env, smoke, fire, current_speed)
+
+        elif self.state == MOVING_TO_EXIT and self._target_exit is not None:
             # Check if we reached the exit
             diff_exit = np.array(self._target_exit) - self.pos
             dist_exit = np.linalg.norm(diff_exit)
@@ -192,19 +225,27 @@ class Civilian:
             self._do_wall_follow(env, current_speed)
 
         elif self.state == WANDERING:
+            # Tick down cooldown
+            if self._direction_cooldown > 0:
+                self._direction_cooldown -= 1
+                # Keep current direction, just scale speed
+                speed_now = np.linalg.norm(self.vel)
+                if speed_now > 0:
+                    self.vel = self.vel / speed_now * current_speed
             # In smoke and can't see? Switch to wall-following
-            if in_smoke and effective_vision == 0:
+            elif in_smoke and effective_vision == 0:
                 self.state = WALL_FOLLOWING
                 self._do_wall_follow(env, current_speed)
             elif in_smoke or in_fire:
-                # Can still see a bit but in danger — flee away from smoke
+                # In danger — flee, then keep that direction for 10 ticks
                 self._flee_from_danger(env, smoke, fire, current_speed)
+                self._direction_cooldown = 10
             else:
                 # In clear air — remember safe position
                 self._last_safe_pos = self.pos.copy()
-                # Sense danger nearby? Flee before it reaches us
                 if self._sense_nearby_danger(env, smoke, fire):
                     self._flee_from_danger(env, smoke, fire, current_speed)
+                    self._direction_cooldown = 10
                 else:
                     # Random wandering with occasional direction change
                     if self._rng.random() < 0.03:
@@ -241,6 +282,58 @@ class Civilian:
             # Really stuck — try hard to find an opening
             self._pick_open_direction(env, current_speed)
             self._stuck_ticks = 0
+
+    def _find_nearest_doorway(self, env: Environment):
+        """Find the nearest corridor cell using BFS.
+
+        A corridor cell = you can walk 10+ cells in a straight line
+        (horizontally or vertically) without hitting a wall.
+        Room cells are enclosed, so max straight-line walk is short (5-7).
+
+        BFS from our position, return the first corridor cell found.
+        The BFS path naturally goes through the doorway."""
+        gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+        rows, cols = env.grid.shape
+
+        def max_straight_line(r, c):
+            """Longest straight-line walk from (r,c) in any cardinal direction."""
+            best = 0
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                count = 0
+                nr, nc = r + dr, c + dc
+                while 0 <= nr < rows and 0 <= nc < cols and env.grid[nr, nc] != CellType.WALL:
+                    count += 1
+                    nr += dr
+                    nc += dc
+                best = max(best, count)
+            return best
+
+        # Check if we're already in a corridor
+        if max_straight_line(gr, gc) >= 10:
+            return None  # Already in corridor, no need to flee room
+
+        # BFS outward — find the nearest cell with a long straight-line walk
+        visited = {(gr, gc)}
+        queue = deque([(gr, gc, 0)])
+
+        while queue:
+            r, c, d = queue.popleft()
+            if d > 20:
+                continue
+
+            # Check if this cell is in a corridor (long straight walk)
+            if d >= 1 and max_straight_line(r, c) >= 10:
+                wx, wy = env.grid_to_world(r, c)
+                return np.array([wx, wy], dtype=float)
+
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                    if env.grid[nr, nc] != CellType.WALL:
+                        visited.add((nr, nc))
+                        queue.append((nr, nc, d + 1))
+
+        return None  # Can't find corridor — already in one or map is weird
 
     def _set_exit_target(self, env: Environment, exit_pos: tuple) -> None:
         """Set exit target and compute BFS path to it."""

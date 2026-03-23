@@ -8,6 +8,7 @@ from evacsim.fire import FireSystem
 from evacsim.civilian import (
     spawn_civilians,
     IDLE,
+    FLEEING_ROOM,
     WANDERING,
     WALL_FOLLOWING,
     FOLLOWING,
@@ -210,6 +211,8 @@ while running:
             colour = (200, 30, 30)  # red — dead
         elif civ.state == MOVING_TO_EXIT:
             colour = (50, 220, 50)  # green — heading to exit
+        elif civ.state == FLEEING_ROOM:
+            colour = (255, 150, 50)  # orange — fleeing room to doorway
         elif civ.state == FOLLOWING:
             colour = (255, 200, 50)  # yellow — following someone
         elif civ.state == WALL_FOLLOWING:
@@ -249,6 +252,7 @@ while running:
     smoke_cells = int((smoke_grid > 0.02).sum())
     fire_cells = int((fire_grid > 0.1).sum())
     idle = sum(1 for c in civilians if c.state == IDLE)
+    fleeing = sum(1 for c in civilians if c.state == FLEEING_ROOM)
     wandering = sum(1 for c in civilians if c.state == WANDERING)
     wall_f = sum(1 for c in civilians if c.state == WALL_FOLLOWING)
     following = sum(1 for c in civilians if c.state == FOLLOWING)
@@ -257,7 +261,7 @@ while running:
     dead = sum(1 for c in civilians if c.state == DEAD)
     guides_alive = sum(1 for g in guides if g.alive)
     policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
-    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA
