@@ -1,7 +1,7 @@
 import sys
 import pygame
 from PIL import Image
-from config import SimConfig, CIVILIAN_NUMBER
+from config import SimConfig, CIVILIAN_NUMBER, GUIDES_ENABLED, GUIDE_POLICY, GUIDE_COUNT
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
@@ -16,6 +16,7 @@ from evacsim.civilian import (
     DEAD,
 )
 from evacsim.guide import spawn_beacon_guides
+# Future: from evacsim.guide import spawn_sweeper_guides, spawn_router_guides
 
 
 # =====================================================================
@@ -96,8 +97,16 @@ fire_system = FireSystem(env, spread_rate=0.005)
 
 civilians = spawn_civilians(env, n=CIVILIAN_NUMBER, speed=1.5, seed=99)
 
-# Spawn beacon guides — 1 per exit (or adjust count)
-guides = spawn_beacon_guides(env, n_guides=len(env.exits), speed=2.0, seed=77)
+# Spawn guides based on config
+guides = []
+if GUIDES_ENABLED:
+    n = GUIDE_COUNT if GUIDE_COUNT is not None else len(env.exits)
+    if GUIDE_POLICY == "beacon":
+        guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
+    # elif GUIDE_POLICY == "sweeper":
+    #     guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77)
+    # elif GUIDE_POLICY == "router":
+    #     guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77)
 
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)
@@ -247,7 +256,8 @@ while running:
     escaped = sum(1 for c in civilians if c.state == ESCAPED)
     dead = sum(1 for c in civilians if c.state == DEAD)
     guides_alive = sum(1 for g in guides if g.alive)
-    hud_text = f"T:{tick}  {sim_speed}x  Guides:{guides_alive}  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
+    policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA

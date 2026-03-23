@@ -14,4 +14,15 @@ class SimConfig:
     cell_size: float = 10.0
 
 
+# --- Simulation settings (change these to configure runs) ---
+
 CIVILIAN_NUMBER = 50
+
+# Guide policy: "none", "beacon", "sweeper", "router"
+GUIDE_POLICY = "beacon"
+
+# Enable/disable guides (False = no guides, baseline run)
+GUIDES_ENABLED = True
+
+# Number of guides (if None, defaults to 1 per exit)
+GUIDE_COUNT = None
