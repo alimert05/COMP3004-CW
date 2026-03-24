@@ -142,22 +142,151 @@ class Environment:
         row = max(0, min(int(y / self.cell_size), self.rows - 1))
         return row, col
 
+    def detect_rooms(self) -> list[list[tuple[int, int]]]:
+        """Detect enclosed rooms in the map using flood-fill.
+
+        A room = a connected group of floor cells that is enclosed by walls
+        on most sides and smaller than a corridor. Corridors are long thin
+        areas; rooms are compact.
+
+        Returns list of rooms, each room is a list of (row, col) grid cells.
+        """
+        rows, cols = self.grid.shape
+        visited = np.zeros((rows, cols), dtype=bool)
+
+        # Mark walls and exits as visited so we skip them
+        visited[self.grid == CellType.WALL] = True
+
+        rooms = []
+        corridors = []
+
+        for r in range(rows):
+            for c in range(cols):
+                if visited[r, c]:
+                    continue
+
+                # Flood-fill to find connected region
+                region = []
+                queue = [(r, c)]
+                visited[r, c] = True
+
+                while queue:
+                    cr, cc = queue.pop(0)
+                    region.append((cr, cc))
+
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nr, nc = cr + dr, cc + dc
+                        if 0 <= nr < rows and 0 <= nc < cols and not visited[nr, nc]:
+                            if self.grid[nr, nc] != CellType.WALL:
+                                visited[nr, nc] = True
+                                queue.append((nr, nc))
+
+                if len(region) < 4:
+                    continue  # Too tiny
+
+                # Classify: room vs corridor
+                # Get bounding box
+                min_r = min(cell[0] for cell in region)
+                max_r = max(cell[0] for cell in region)
+                min_c = min(cell[1] for cell in region)
+                max_c = max(cell[1] for cell in region)
+                height = max_r - min_r + 1
+                width = max_c - min_c + 1
+
+                # Corridors are very elongated (aspect ratio > 4) or very large
+                aspect = max(width, height) / max(1, min(width, height))
+                area = len(region)
+
+                if aspect > 5 or area > 100:
+                    corridors.append(region)
+                else:
+                    rooms.append(region)
+
+        # If no rooms detected (e.g. open plan), treat the whole map
+        # as one space — the old random approach will be used
+        return rooms
+
     def spawn_positions(self, n: int, seed: int = 0) -> list[tuple[float, float]]:
-        """Pick n random FLOOR cells and return their world-coordinate centres.
+        """Spawn n civilians clustered inside rooms.
 
-        Rules:
-          - Only FLOOR cells (not walls, not exits, not fire sources)
-          - At least 3 cells away from any exit (so civilians don't start at the door)
-          - Each cell is used at most once (no two civilians in the same cell)
+        Instead of scattering randomly across the whole map:
+          1. Detect rooms in the map
+          2. Distribute civilians proportionally to room size
+          3. Cluster civilians near the center of each room (at desks)
+          4. Small random offset so they're not on top of each other
 
-        Returns a list of (x, y) world positions, one per civilian.
+        Falls back to random floor cells if no rooms detected.
         """
         rng = np.random.default_rng(seed)
+        rooms = self.detect_rooms()
 
-        # Find all floor cells
+        # Filter rooms: skip fire-source rooms, skip tiny rooms
+        exit_grid = set(self.world_to_grid(ex, ey) for ex, ey in self.exits)
+        fire_set = set(self.fire_sources)
+
+        valid_rooms = []
+        for room in rooms:
+            # Skip rooms that contain fire sources
+            has_fire = any((r, c) in fire_set for r, c in room)
+            # Skip rooms that contain exits (they're doorways/lobbies)
+            has_exit = any((r, c) in exit_grid for r, c in room)
+            if not has_fire and not has_exit and len(room) >= 6:
+                valid_rooms.append(room)
+
+        if not valid_rooms:
+            # Fallback: random floor cells (old approach)
+            return self._spawn_random(n, seed)
+
+        # Distribute civilians proportionally to room size
+        total_cells = sum(len(room) for room in valid_rooms)
+        positions = []
+
+        for room in valid_rooms:
+            # How many civilians in this room (proportional to size)
+            room_share = len(room) / total_cells
+            room_n = max(1, round(n * room_share))
+
+            # Pick cells near the center of the room
+            room_arr = np.array(room)
+            center_r = room_arr[:, 0].mean()
+            center_c = room_arr[:, 1].mean()
+
+            # Sort cells by distance to center (inner cells first)
+            dists = np.sqrt((room_arr[:, 0] - center_r) ** 2 +
+                            (room_arr[:, 1] - center_c) ** 2)
+            sorted_idx = np.argsort(dists)
+
+            # Pick the inner cells (not edge cells near walls)
+            inner_cells = [room[sorted_idx[i]]
+                           for i in range(min(len(sorted_idx), room_n * 2))]
+
+            # Randomly pick from inner cells
+            rng.shuffle(inner_cells)
+            chosen = inner_cells[:room_n]
+
+            for r, c in chosen:
+                wx, wy = self.grid_to_world(r, c)
+                # Small random offset within the cell (not exactly center)
+                ox = rng.uniform(-self.cell_size * 0.3, self.cell_size * 0.3)
+                oy = rng.uniform(-self.cell_size * 0.3, self.cell_size * 0.3)
+                positions.append((wx + ox, wy + oy))
+
+        # If we got too many or too few, adjust
+        if len(positions) > n:
+            rng.shuffle(positions)
+            positions = positions[:n]
+        elif len(positions) < n:
+            # Fill remaining with random floor cells
+            extra = self._spawn_random(n - len(positions), seed + 1000)
+            positions.extend(extra)
+
+        return positions[:n]
+
+    def _spawn_random(self, n: int, seed: int) -> list[tuple[float, float]]:
+        """Old random spawning as fallback."""
+        rng = np.random.default_rng(seed)
         floor_cells = list(zip(*np.where(self.grid == CellType.FLOOR)))
 
-        # Remove cells too close to exits (within 3 cells Manhattan distance)
         exit_grid = [self.world_to_grid(ex, ey) for ex, ey in self.exits]
         safe_cells = []
         for r, c in floor_cells:
@@ -166,17 +295,14 @@ class Environment:
                 if abs(r - er) + abs(c - ec) < 4:
                     too_close = True
                     break
-            # Also skip fire source cells
             if (r, c) in self.fire_sources:
                 too_close = True
             if not too_close:
                 safe_cells.append((r, c))
 
-        # Pick n unique cells at random
         n = min(n, len(safe_cells))
         indices = rng.choice(len(safe_cells), size=n, replace=False)
 
-        # Convert to world coordinates (centre of each cell)
         positions = []
         for idx in indices:
             r, c = safe_cells[idx]

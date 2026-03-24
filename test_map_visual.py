@@ -8,6 +8,7 @@ from evacsim.fire import FireSystem
 from evacsim.civilian import (
     spawn_civilians,
     IDLE,
+    REACTING,
     FLEEING_ROOM,
     WANDERING,
     WALL_FOLLOWING,
@@ -208,38 +209,64 @@ while running:
         sx = int(civ.pos[0] * SCALE)
         sy = int(civ.pos[1] * SCALE)
         if civ.state == DEAD:
-            colour = (200, 30, 30)  # red — dead
+            colour = (200, 30, 30)    # red — dead
         elif civ.state == MOVING_TO_EXIT:
-            colour = (50, 220, 50)  # green — heading to exit
+            colour = (50, 220, 50)    # green — heading to exit
         elif civ.state == FLEEING_ROOM:
-            colour = (255, 150, 50)  # orange — fleeing room to doorway
+            colour = (255, 150, 50)   # orange — fleeing room
         elif civ.state == FOLLOWING:
-            colour = (255, 200, 50)  # yellow — following someone
+            colour = (255, 200, 50)   # yellow — following someone
         elif civ.state == WALL_FOLLOWING:
-            colour = (200, 100, 255)  # purple — blind, following wall
+            colour = (200, 100, 255)  # purple — blind, wall-following
+        elif civ.state == REACTING:
+            colour = (255, 255, 150)  # light yellow — noticed danger, processing
         elif civ.state == IDLE:
-            colour = (180, 180, 180)  # grey — unaware
+            colour = (180, 180, 180)  # grey — at desk, unaware
         else:
-            colour = (50, 120, 255)  # blue — wandering
+            colour = (50, 120, 255)   # blue — wandering
         pygame.draw.circle(screen, colour, (sx, sy), CIV_RADIUS)
         pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
 
-    # Draw guides — orange diamonds, larger than civilians
+    # Draw guides — orange diamonds (or red if self-evacuating)
     for guide in guides:
         if not guide.alive:
             continue
         gx = int(guide.pos[0] * SCALE)
         gy = int(guide.pos[1] * SCALE)
         r = GUIDE_RADIUS
+
+        # Color: orange normally, red when self-evacuating
+        if guide._self_evacuating:
+            fill_colour = (220, 50, 50)  # Red — escaping
+        else:
+            fill_colour = (255, 140, 0)  # Orange — on duty
+
         # Draw diamond shape
         points = [(gx, gy - r), (gx + r, gy), (gx, gy + r), (gx - r, gy)]
-        pygame.draw.polygon(screen, (255, 140, 0), points)       # orange fill
-        pygame.draw.polygon(screen, (0, 0, 0), points, 2)        # black outline
-        # Draw broadcast radius circle (faint)
-        brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
-        broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
-        pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
-        screen.blit(broadcast_surf, (gx - brad, gy - brad))
+        pygame.draw.polygon(screen, fill_colour, points)
+        pygame.draw.polygon(screen, (0, 0, 0), points, 2)
+
+        # Draw health bar above guide
+        bar_w = CELL // 2
+        bar_h = 3
+        bar_x = gx - bar_w // 2
+        bar_y = gy - r - 5
+        health = guide.health
+        pygame.draw.rect(screen, (60, 60, 60), (bar_x, bar_y, bar_w, bar_h))
+        if health > 0.6:
+            bar_col = (50, 200, 50)
+        elif health > 0.3:
+            bar_col = (255, 200, 50)
+        else:
+            bar_col = (220, 50, 50)
+        pygame.draw.rect(screen, bar_col, (bar_x, bar_y, int(bar_w * health), bar_h))
+
+        # Draw broadcast radius circle (only if not evacuating)
+        if not guide._self_evacuating:
+            brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
+            broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
+            pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
+            screen.blit(broadcast_surf, (gx - brad, gy - brad))
 
     # Advance animation
     frame_timer += 1
@@ -252,6 +279,7 @@ while running:
     smoke_cells = int((smoke_grid > 0.02).sum())
     fire_cells = int((fire_grid > 0.1).sum())
     idle = sum(1 for c in civilians if c.state == IDLE)
+    reacting = sum(1 for c in civilians if c.state == REACTING)
     fleeing = sum(1 for c in civilians if c.state == FLEEING_ROOM)
     wandering = sum(1 for c in civilians if c.state == WANDERING)
     wall_f = sum(1 for c in civilians if c.state == WALL_FOLLOWING)
@@ -261,7 +289,7 @@ while running:
     dead = sum(1 for c in civilians if c.state == DEAD)
     guides_alive = sum(1 for g in guides if g.alive)
     policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
-    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  React:{reacting}  Flee:{fleeing}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA

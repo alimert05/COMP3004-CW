@@ -84,22 +84,110 @@ class Guide:
         self._fire_damage = 0.0
         self._max_fire_damage = 300.0  # Much tougher than civilians
 
+        # Also take smoke damage (less than civilians, but still accumulates)
+        self._smoke_damage = 0.0
+        self._max_smoke_damage = 250.0
+
+        # Total health = fire + smoke combined
+        # When health drops below threshold, guide abandons mission and escapes
+        self._health_threshold = 0.6  # 60% — start escaping at 40% health remaining
+
+        # Self-evacuation state
+        self._self_evacuating = False
+        self._escape_waypoints = []
+
         # Which exit this guide is assigned to
         self.assigned_exit = None
 
+    @property
+    def health(self) -> float:
+        """Current health as 0.0-1.0 ratio. 1.0 = full health, 0.0 = dead."""
+        fire_ratio = self._fire_damage / self._max_fire_damage
+        smoke_ratio = self._smoke_damage / self._max_smoke_damage
+        # Worst of the two damage types determines health
+        return max(0.0, 1.0 - max(fire_ratio, smoke_ratio))
+
     def update(self, env: Environment, smoke: SmokeSystem,
                fire: FireSystem, civilians: list) -> None:
-        """Override in subclasses."""
+        """Base update — handles damage and self-evacuation.
+        Override in subclasses but call super().update() first."""
         if not self.alive:
             return
 
         # Check fire damage (guides resist smoke but not fire)
         local_fire = fire.get_density_at(self.pos[0], self.pos[1])
+        local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
+
         if local_fire > 0.3:
             self._fire_damage += 2.0
-        if self._fire_damage >= self._max_fire_damage:
+        if local_smoke > 0.3:
+            self._smoke_damage += local_smoke * 0.5  # Half damage vs civilians
+
+        # Check for death
+        if self._fire_damage >= self._max_fire_damage or self._smoke_damage >= self._max_smoke_damage:
             self.alive = False
             return
+
+        # Check health threshold — start self-evacuating
+        if not self._self_evacuating and self.health < self._health_threshold:
+            self._start_self_evacuation(env)
+
+    def _start_self_evacuation(self, env: Environment) -> None:
+        """Guide's health is critical — abandon mission, head to nearest exit."""
+        self._self_evacuating = True
+
+        # Find nearest exit
+        best_exit = None
+        best_dist = float("inf")
+        for ex, ey in self.known_exits:
+            d = np.sqrt((self.pos[0] - ex) ** 2 + (self.pos[1] - ey) ** 2)
+            if d < best_dist:
+                best_dist = d
+                best_exit = np.array([ex, ey], dtype=float)
+
+        if best_exit is not None:
+            self._escape_waypoints = bfs_path(env, self.pos, best_exit)
+
+    def _do_self_evacuation(self, env: Environment) -> bool:
+        """Follow escape path to exit. Returns True if currently self-evacuating."""
+        if not self._self_evacuating:
+            return False
+
+        # Check if reached exit
+        for ex, ey in self.known_exits:
+            dist = np.sqrt((self.pos[0] - ex) ** 2 + (self.pos[1] - ey) ** 2)
+            if dist < env.cell_size:
+                self.alive = False  # Guide escaped (remove from simulation)
+                return True
+
+        # Follow escape waypoints
+        if self._escape_waypoints:
+            target = self._escape_waypoints[0]
+            diff = target - self.pos
+            dist = np.linalg.norm(diff)
+
+            if dist < env.cell_size * 0.5:
+                self._escape_waypoints.pop(0)
+                if self._escape_waypoints:
+                    target = self._escape_waypoints[0]
+                    diff = target - self.pos
+                    dist = np.linalg.norm(diff)
+
+            if dist > 0:
+                direction = diff / dist
+                self.vel = direction * self.speed * 1.5  # Sprint to exit
+
+            # Move
+            vx, vy = self.vel
+            x, y = self.pos
+            if env.is_walkable(x + vx, y + vy):
+                self.pos = np.array([x + vx, y + vy])
+            elif env.is_walkable(x + vx, y):
+                self.pos = np.array([x + vx, y])
+            elif env.is_walkable(x, y + vy):
+                self.pos = np.array([x, y + vy])
+
+        return True
 
     def get_broadcast_radius(self, smoke: SmokeSystem) -> float:
         """Broadcast radius reduced by smoke but still much better than civilian vision.
@@ -230,6 +318,10 @@ class BeaconGuide(Guide):
         """Move to beacon position via BFS path, then stand and broadcast."""
         super().update(env, smoke, fire, civilians)
         if not self.alive:
+            return
+
+        # Self-evacuation overrides everything
+        if self._do_self_evacuation(env):
             return
 
         # --- Phase 1: Follow path to beacon position ---
