@@ -49,6 +49,45 @@ class Environment:
         # Now actually load the map file and fill everything above
         self._load_map(config.map_file)
 
+        # If fire_position is set in config, override map's F markers
+        fire_pos = getattr(config, 'fire_position', None)
+        if fire_pos is not None:
+            self.fire_sources.clear()
+            pos = self._resolve_fire_position(fire_pos)
+            if pos is not None:
+                self.fire_sources.append(pos)
+
+    def _resolve_fire_position(self, position: str) -> tuple:
+        """Convert named fire position to grid coordinates.
+        Finds the nearest FLOOR cell to the target position."""
+        margin_r = max(3, self.rows // 6)
+        margin_c = max(3, self.cols // 6)
+
+        positions = {
+            "center":       (self.rows // 2, self.cols // 2),
+            "top_left":     (margin_r, margin_c),
+            "top_right":    (margin_r, self.cols - margin_c),
+            "bottom_left":  (self.rows - margin_r, margin_c),
+            "bottom_right": (self.rows - margin_r, self.cols - margin_c),
+        }
+
+        if position not in positions:
+            return None
+
+        target_r, target_c = positions[position]
+
+        # Find nearest floor cell to the target
+        best = None
+        best_dist = float("inf")
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.grid[r, c] == CellType.FLOOR:
+                    d = abs(r - target_r) + abs(c - target_c)
+                    if d < best_dist:
+                        best_dist = d
+                        best = (r, c)
+        return best
+
     def _load_map(self, path: str) -> None:
         # Dictionary that translates characters from the text file into numbers
         # When we see '.' in the file, store 0 in the grid

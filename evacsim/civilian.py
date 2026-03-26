@@ -218,10 +218,17 @@ class Civilian:
             effective_vision = self.vision_radius
 
         # --- Effective speed ---
+        # Goal-directed states (have a BFS path): only mild slowdown in smoke
+        # Wandering/no-goal states: heavy slowdown in smoke
+        has_path = self.state in (FLEEING_ROOM, MOVING_TO_EXIT, FOLLOWING)
+
         if in_fire:
             current_speed = self.speed * 1.8
         elif in_smoke:
-            current_speed = self.speed * 0.3
+            if has_path:
+                current_speed = self.speed * 0.7  # Know where to go, push through
+            else:
+                current_speed = self.speed * 0.3  # Lost, stumbling
         else:
             current_speed = self.speed
 
@@ -254,10 +261,10 @@ class Civilian:
                         dist = np.linalg.norm(diff)
 
                 if dist > 0:
-                    desired_dir = diff / dist
-                    self.vel = self._compute_social_force(
-                        desired_dir, current_speed, env, all_civilians,
-                        has_goal=True)
+                    # Direct path following — NO social forces
+                    # They know the room, they push straight to the door
+                    direction = diff / dist
+                    self.vel = direction * current_speed
             else:
                 self.state = WANDERING
                 self._pick_new_direction()
@@ -282,16 +289,13 @@ class Civilian:
                         dist = np.linalg.norm(diff)
 
                 if dist > 0:
-                    desired_dir = diff / dist
-                    self.vel = self._compute_social_force(
-                        desired_dir, current_speed, env, all_civilians,
-                        has_goal=True)
+                    # Direct path — push through smoke to reach exit
+                    direction = diff / dist
+                    self.vel = direction * current_speed
             else:
                 if dist_exit > 0:
-                    desired_dir = diff_exit / dist_exit
-                    self.vel = self._compute_social_force(
-                        desired_dir, current_speed, env, all_civilians,
-                        has_goal=True)
+                    direction = diff_exit / dist_exit
+                    self.vel = direction * current_speed
 
         elif self.state == FOLLOWING and self._follow_target is not None:
             target = self._follow_target
@@ -303,10 +307,8 @@ class Civilian:
                 diff = target.pos - self.pos
                 dist = np.linalg.norm(diff)
                 if dist > 1.0:
-                    desired_dir = diff / dist
-                    self.vel = self._compute_social_force(
-                        desired_dir, current_speed, env, all_civilians,
-                        has_goal=True)
+                    direction = diff / dist
+                    self.vel = direction * current_speed
                 if effective_vision > 0:
                     nearest_exit, _ = self._find_nearest_exit(env, effective_vision)
                     if nearest_exit is not None:
@@ -318,32 +320,26 @@ class Civilian:
         elif self.state == WANDERING:
             if self._direction_cooldown > 0:
                 self._direction_cooldown -= 1
-                # Keep current direction but apply social forces
                 speed_now = np.linalg.norm(self.vel)
                 if speed_now > 0:
-                    desired_dir = self.vel / speed_now
-                    self.vel = self._compute_social_force(
-                        desired_dir, current_speed, env, all_civilians,
-                        has_goal=True)
+                    self.vel = self.vel / speed_now * current_speed
             elif in_smoke and effective_vision == 0:
                 self.state = WALL_FOLLOWING
                 self._do_wall_follow(env, current_speed)
-            elif in_smoke or in_fire:
-                self._flee_from_danger(env, smoke, fire, current_speed)
-                self._direction_cooldown = 10
+            elif in_smoke or in_fire or self._sense_nearby_danger(env, smoke, fire):
+                # KEY FIX: Don't flee FROM smoke — go TOWARD open space.
+                # Smoke enters through the doorway, so "flee from smoke"
+                # pushes civilians to the back of the room (death trap).
+                # Instead, go toward the most open direction (= doorway).
+                self._pick_open_direction(env, current_speed)
+                self._direction_cooldown = 15
             else:
                 self._last_safe_pos = self.pos.copy()
-                if self._sense_nearby_danger(env, smoke, fire):
-                    self._flee_from_danger(env, smoke, fire, current_speed)
-                    self._direction_cooldown = 10
-                else:
-                    if self._rng.random() < 0.03:
-                        self._pick_new_direction()
-                    speed_now = np.linalg.norm(self.vel)
-                    if speed_now > 0:
-                        desired_dir = self.vel / speed_now
-                        self.vel = self._compute_social_force(
-                            desired_dir, current_speed, env, all_civilians)
+                if self._rng.random() < 0.03:
+                    self._pick_new_direction()
+                speed_now = np.linalg.norm(self.vel)
+                if speed_now > 0:
+                    self.vel = self.vel / speed_now * current_speed
 
         # --- Move (with wall collision check) ---
         vx, vy = self.vel
@@ -381,9 +377,16 @@ class Civilian:
     # ================================================================
 
     def _find_nearest_doorway(self, env: Environment):
-        """BFS to find nearest corridor cell (can walk 10+ cells in a line)."""
+        """BFS to find nearest corridor cell.
+
+        A corridor cell has a long unbroken walkable line in at least one
+        cardinal direction (>= 6 cells). Room cells are enclosed by walls
+        so their max straight line is shorter.
+
+        If we're already in a corridor, returns None."""
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = env.grid.shape
+        threshold = 6  # Corridor = can walk 6+ cells in a straight line
 
         def max_straight_line(r, c):
             best = 0
@@ -397,17 +400,19 @@ class Civilian:
                 best = max(best, count)
             return best
 
-        if max_straight_line(gr, gc) >= 10:
+        # Already in corridor? No need to flee room
+        if max_straight_line(gr, gc) >= threshold:
             return None
 
+        # BFS outward — find nearest corridor cell
         visited = {(gr, gc)}
         queue = deque([(gr, gc, 0)])
 
         while queue:
             r, c, d = queue.popleft()
-            if d > 20:
+            if d > 30:
                 continue
-            if d >= 1 and max_straight_line(r, c) >= 10:
+            if d >= 1 and max_straight_line(r, c) >= threshold:
                 wx, wy = env.grid_to_world(r, c)
                 return np.array([wx, wy], dtype=float)
 

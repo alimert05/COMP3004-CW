@@ -28,7 +28,7 @@ from evacsim.guide import spawn_beacon_guides
 if len(sys.argv) > 1:
     map_file = sys.argv[1]
 else:
-    map_file = "maps/bottleneck.txt"
+    map_file = "maps/bottleneck_A.txt"
 
 config = SimConfig(map_file=map_file)
 env = Environment(config)

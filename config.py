@@ -1,28 +1,26 @@
-# We import 'dataclass' — a shortcut that auto-creates __init__ for us
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-# @dataclass means: "make this class a simple data holder"
-# It automatically creates __init__ so we don't have to write one
 @dataclass
 class SimConfig:
-    # Which map file to load. Default is the bottleneck map
-    map_file: str = "maps/bottleneck.txt"
-
-    # How big each grid cell is in "world units"
-    # Our grid is like graph paper — this says each square is 10x10 units
+    map_file: str = "maps/bottleneck_A.txt"
     cell_size: float = 10.0
 
+    # Fire start position as (row, col) grid coordinates
+    # If None, uses F markers in the map file
+    # Named positions: "center", "top_left", "top_right", "bottom_left", "bottom_right"
+    fire_position: str = "center"
 
-# --- Simulation settings (change these to configure runs) ---
+
+# --- Simulation settings ---
 
 CIVILIAN_NUMBER = 50
 
 # Guide policy: "none", "beacon", "sweeper", "router"
 GUIDE_POLICY = "beacon"
 
-# Enable/disable guides (False = no guides, baseline run)
-GUIDES_ENABLED = True
+# Enable/disable guides
+GUIDES_ENABLED = False
 
-# Number of guides (if None, defaults to 1 per exit)
+# Number of guides (None = 1 per exit)
 GUIDE_COUNT = None
