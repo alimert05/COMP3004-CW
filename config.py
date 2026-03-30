@@ -17,7 +17,7 @@ class SimConfig:
 CIVILIAN_NUMBER = 50
 
 # Guide policy: "none", "beacon", "sweeper", "router"
-GUIDE_POLICY = "sweeper"
+GUIDE_POLICY = "router"
 
 # Enable/disable guides
 GUIDES_ENABLED = True

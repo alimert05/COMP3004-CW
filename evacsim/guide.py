@@ -753,3 +753,214 @@ def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
         guides.append(guide)
 
     return guides
+
+
+# ════════════════════════════════════════════════════════════════════
+# CONGESTION-AWARE ROUTER — dynamically redirects to less-crowded exits
+# ════════════════════════════════════════════════════════════════════
+
+class RouterGuide(Guide):
+    """
+    Router policy: monitor exit congestion and redirect civilians.
+
+    1. Every 20 ticks, count civilians heading to each exit
+    2. If one exit has 2x+ more than another → congestion
+    3. Reposition to intercept civilians heading to congested exit
+    4. Redirect them to the less-congested exit
+    5. If balanced, act as beacon for least-served exit
+
+    The only policy that uses GLOBAL state (exit load) to make decisions.
+    """
+
+    MONITORING = "monitoring"
+    REPOSITIONING = "repositioning"
+
+    def __init__(self, x: float, y: float, speed: float,
+                 env: Environment, rng: np.random.Generator):
+        super().__init__(x, y, speed, env, rng)
+
+        self._eval_interval = 20
+        self._eval_counter = 0
+        self._recommended_exit = None
+        self._waypoints = []
+        self._phase = self.MONITORING
+
+        # Find a central position in the building to start from
+        self._home_pos = self._find_central_position(env)
+        self._waypoints = bfs_path(env, self.pos, self._home_pos)
+        self._phase = self.REPOSITIONING
+
+        # Initial recommendation: first exit
+        if self.known_exits:
+            self._recommended_exit = self.known_exits[0]
+
+    def _find_central_position(self, env):
+        """Find a walkable cell near the center of the building."""
+        mid_x = env.width / 2.0
+        mid_y = env.height / 2.0
+        gr, gc = env.world_to_grid(mid_x, mid_y)
+        rows, cols = env.grid.shape
+
+        if env.grid[gr, gc] != CellType.WALL:
+            return np.array(env.grid_to_world(gr, gc), dtype=float)
+
+        # BFS from center to find nearest floor cell
+        visited = {(gr, gc)}
+        queue = deque([(gr, gc)])
+        while queue:
+            r, c = queue.popleft()
+            if env.grid[r, c] != CellType.WALL:
+                return np.array(env.grid_to_world(r, c), dtype=float)
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    queue.append((nr, nc))
+
+        return np.array([mid_x, mid_y], dtype=float)  # Fallback
+
+    def update(self, env: Environment, smoke: SmokeSystem,
+               fire: FireSystem, civilians: list) -> None:
+        super().update(env, smoke, fire, civilians)
+        if not self.alive:
+            return
+        if self._do_self_evacuation(env):
+            return
+
+        # Periodic congestion check
+        self._eval_counter += 1
+        if self._eval_counter >= self._eval_interval:
+            self._eval_counter = 0
+            self._evaluate_congestion(env, civilians)
+
+        # Always broadcast to nearby civilians
+        self._broadcast_redirect(env, smoke, civilians)
+
+        # Move if repositioning
+        if self._phase == self.REPOSITIONING:
+            if not self._waypoints:
+                self._phase = self.MONITORING
+                self.vel = np.zeros(2)
+            else:
+                self._follow_path(env)
+        else:
+            self.vel = np.zeros(2)
+
+    def _evaluate_congestion(self, env, civilians):
+        """Count civilians per exit, detect imbalance, reposition if needed."""
+        from evacsim.civilian import MOVING_TO_EXIT
+
+        # Count per exit
+        exit_counts = {}
+        for ex, ey in self.known_exits:
+            exit_counts[(ex, ey)] = 0
+
+        for civ in civilians:
+            if civ.state != MOVING_TO_EXIT or civ._target_exit is None:
+                continue
+            tx, ty = civ._target_exit
+            # Match to nearest exit
+            best_exit, best_d = None, float("inf")
+            for ex, ey in self.known_exits:
+                d = np.hypot(tx - ex, ty - ey)
+                if d < best_d:
+                    best_d = d
+                    best_exit = (ex, ey)
+            if best_exit and best_d < env.cell_size * 2:
+                exit_counts[best_exit] += 1
+
+        if not exit_counts:
+            return
+
+        most = max(exit_counts, key=exit_counts.get)
+        least = min(exit_counts, key=exit_counts.get)
+        max_n = exit_counts[most]
+        min_n = exit_counts[least]
+
+        # Congestion? (2x imbalance or diff > 5)
+        if max_n > 0 and (max_n >= max(1, min_n) * 2 or max_n - min_n > 5):
+            # Redirect to least congested exit
+            self._recommended_exit = least
+
+            # Reposition: move toward the congested exit to intercept civilians
+            congested_pos = np.array(most, dtype=float)
+            # Intercept point: between our home and the congested exit
+            intercept = (self._home_pos + congested_pos) / 2.0
+            gr, gc = env.world_to_grid(intercept[0], intercept[1])
+            rows, cols = env.grid.shape
+            gr = max(0, min(rows - 1, gr))
+            gc = max(0, min(cols - 1, gc))
+
+            # Find nearest walkable cell
+            if env.grid[gr, gc] == CellType.WALL:
+                visited = {(gr, gc)}
+                q = deque([(gr, gc)])
+                while q:
+                    r, c = q.popleft()
+                    if env.grid[r, c] != CellType.WALL:
+                        gr, gc = r, c
+                        break
+                    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        nr, nc = r + dr, c + dc
+                        if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                            visited.add((nr, nc))
+                            q.append((nr, nc))
+
+            target = np.array(env.grid_to_world(gr, gc), dtype=float)
+            self._waypoints = bfs_path(env, self.pos, target)
+            self._phase = self.REPOSITIONING
+        else:
+            # Balanced — recommend least-served, return home
+            self._recommended_exit = least
+            if np.linalg.norm(self.pos - self._home_pos) > env.cell_size * 3:
+                self._waypoints = bfs_path(env, self.pos, self._home_pos)
+                self._phase = self.REPOSITIONING
+
+    def _broadcast_redirect(self, env, smoke, civilians):
+        """Broadcast recommended exit to nearby civilians.
+        KEY: can REDIRECT civilians already heading to a different exit."""
+        if self._recommended_exit is None:
+            return
+
+        radius = self.get_broadcast_radius(smoke)
+        exit_pos = self._recommended_exit
+
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
+
+        for civ in civilians:
+            if civ.state in (ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius:
+                if civ.state == IDLE:
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 10)
+                    civ._guide_told_exit = exit_pos
+                elif civ.state == REACTING:
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    civ._guide_told_exit = exit_pos
+                elif civ.state == MOVING_TO_EXIT:
+                    # REDIRECT civilians heading to congested exit
+                    if civ._target_exit is not None:
+                        d = np.hypot(civ._target_exit[0] - exit_pos[0],
+                                     civ._target_exit[1] - exit_pos[1])
+                        if d > env.cell_size * 2:  # Different exit
+                            civ._set_exit_target_force(env, exit_pos)
+                else:
+                    civ._set_exit_target(env, exit_pos)
+
+
+def spawn_router_guides(env: Environment, n_guides: int, speed: float = 2.0,
+                        seed: int = 77) -> list[RouterGuide]:
+    """Spawn router guides from exits."""
+    rng = np.random.default_rng(seed)
+    exits = list(env.exits)
+    guides = []
+    for i in range(n_guides):
+        ex, ey = exits[i % len(exits)]
+        guide = RouterGuide(ex, ey, speed, env, rng)
+        guides.append(guide)
+    return guides

@@ -18,7 +18,7 @@ from evacsim.civilian import (
     ESCAPED,
     DEAD,
 )
-from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides
+from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides, spawn_router_guides
 
 
 # =====================================================================
@@ -107,8 +107,8 @@ if GUIDES_ENABLED:
         guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
     elif GUIDE_POLICY == "sweeper":
         guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77)
-    # elif GUIDE_POLICY == "router":
-    #     guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77)
+    elif GUIDE_POLICY == "router":
+        guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77)
 
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)
