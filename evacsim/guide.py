@@ -337,36 +337,48 @@ class BeaconGuide(Guide):
         # --- Phase 2: In position — broadcast to nearby civilians ---
         radius = self.get_broadcast_radius(smoke)
 
-        from evacsim.civilian import MOVING_TO_EXIT, ESCAPED, DEAD, IDLE
+        from evacsim.civilian import MOVING_TO_EXIT, ESCAPED, DEAD, IDLE, REACTING
+
+        exit_pos = (self.assigned_exit[0], self.assigned_exit[1])
 
         for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, IDLE):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD):
                 continue
 
             dist = np.linalg.norm(civ.pos - self.pos)
             if dist < radius:
-                # Tell civilian where the exit is — they compute BFS path
-                exit_pos = (self.assigned_exit[0], self.assigned_exit[1])
-                civ._set_exit_target(env, exit_pos)
+                if civ.state == IDLE:
+                    # Fix #1: Wake up idle civilians — guide is shouting!
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 10)
+                    civ._guide_told_exit = exit_pos  # Remember exit for after reaction
+                elif civ.state == REACTING:
+                    # Fix #2: Speed up reaction — hearing a guide snaps you out faster
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    civ._guide_told_exit = exit_pos
+                else:
+                    # Active civilian — give them the exit location
+                    civ._set_exit_target(env, exit_pos)
 
 
 def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
                         seed: int = 77) -> list[BeaconGuide]:
-    """Spawn beacon guides, distributing them across exits.
+    """Spawn beacon guides AT the exits (realistic — firefighters enter from outside).
 
-    Each guide is assigned to an exit. If more guides than exits,
-    multiple guides cover the same exit from different approach directions.
-    Guides spawn on random floor cells (like civilians), then walk to position.
+    Each guide starts at an assigned exit and walks inward to their beacon position.
+    If more guides than exits, multiple guides share exits (round-robin).
     """
     rng = np.random.default_rng(seed)
-    positions = env.spawn_positions(n_guides, seed=seed + 1000)
     exits = list(env.exits)
 
     guides = []
-    for i, (x, y) in enumerate(positions):
+    for i in range(n_guides):
         # Round-robin assign exits
         assigned_exit = exits[i % len(exits)]
-        guide = BeaconGuide(x, y, speed, env, rng, assigned_exit=assigned_exit)
+        ex, ey = assigned_exit
+        # Spawn AT the exit position
+        guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=assigned_exit)
         guides.append(guide)
 
     return guides

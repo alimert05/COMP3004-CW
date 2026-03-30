@@ -1,34 +1,37 @@
 """
-Civilian agent — clean rewrite.
+Civilian agent — paper-grounded 5-rule model.
 
-Simple state machine:
-  IDLE → REACTING → NAVIGATING → ESCAPED / DEAD
+Academic basis:
+  - Potency system: Kasereka et al. 2018 (energy 50-100, decreases in smoke/fire, no recovery)
+  - Reaction delay: Proulx 2001 (pre-evacuation time 0.5-2s)
+  - Random walk: Standard ABM approach (Senanayake et al. 2024 review)
+  - Disorientation in smoke: Smart Cities MDPI 2024 (random direction change proportional to density)
+  - Herding: Helbing et al. 2000 (follow average crowd direction, not individual)
+  - Speed in smoke: Jin 1978 (visibility vs walking speed)
+  - BFS pathfinding: Dijkstra variant (Kasereka 2018)
 
-Movement:
-  - Has a BFS path? Follow it (doorway, exit, guide instruction).
-  - No path? Walk along corridor using run-length detection.
-  - Blind in smoke? Wall-follow with hand rule.
-
-Key design: civilians are DUMB. They don't know where exits are (1-cell vision).
-They need guides to survive. Without guides, they wander corridors randomly
-and most die from smoke.
+5 Rules:
+  1. No target → random walk (pick cardinal direction, walk until wall)
+  2. Has target → follow BFS path (push through smoke)
+  3. In smoke → disorientation (random direction change, probability ∝ density)
+  4. Nearby civilians moving → herding (bias toward average crowd direction)
+  5. Potency ≤ 0 → dead
 """
 
 import numpy as np
-from collections import deque
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
 from evacsim.guide import bfs_path
 
 
-# ── States ──────────────────────────────────────────────────────────
+# ── States (simplified) ─────────────────────────────────────────────
 IDLE = 0            # At desk, unaware
-REACTING = 1        # Noticed danger, standing still (reaction delay)
+REACTING = 1        # Noticed danger, frozen (reaction delay)
 FLEEING_ROOM = 2    # Following BFS path to corridor doorway
-WANDERING = 3       # In corridor, no goal, corridor-following
+WANDERING = 3       # Random walk, no goal
 WALL_FOLLOWING = 4  # Blind in smoke, hand-on-wall
-FOLLOWING = 5       # Walking toward another civilian who has a goal
+FOLLOWING = 5       # Herding — biased toward crowd direction
 MOVING_TO_EXIT = 6  # Following BFS path to exit
 ESCAPED = 7
 DEAD = 8
@@ -46,34 +49,36 @@ class Civilian:
 
         self.state = IDLE
 
-        # Reaction delay (random 15-90 ticks ≈ 0.5-3s at 30fps)
-        self._reaction_delay = int(rng.uniform(15, 90))
+        # Reaction delay: 0.5-2s at 30fps (Proulx 2001)
+        self._reaction_delay = int(rng.uniform(15, 60))
         self._reaction_counter = 0
 
-        # BFS waypoints (shared by FLEEING_ROOM and MOVING_TO_EXIT)
+        # Potency: energy/health system (Kasereka 2018)
+        # Random 50-100. Decreases in smoke/fire. NO recovery. At 0 = dead.
+        self.potency = rng.uniform(50.0, 100.0)
+
+        # BFS waypoints + target
         self._waypoints = []
         self._target_exit = None
 
-        # Following target (another civilian)
-        self._follow_target = None
+        # Random walk: current direction (cardinal)
+        self._walk_dir = None
 
-        # Corridor-following state
-        self._corridor_dir = None   # Current committed cardinal direction
-        self._corridor_ticks = 0    # Ticks walking this direction
+        # Exit told by guide (set before reaction finishes, used after)
+        self._guide_told_exit = None
 
-        # Wall-following hand rule (random per civilian)
+        # Wall-following hand rule
         self._wall_hand = 1 if rng.random() < 0.5 else -1
-
-        # Smoke/fire damage
-        self._smoke_damage = 0.0
-        self._max_smoke_damage = 150.0
 
         # Stuck detection
         self._prev_pos = self.pos.copy()
         self._stuck_ticks = 0
 
+        # For sweeper guide (Phase 2)
+        self.assigned_guide = None
+
     # ================================================================
-    # MAIN UPDATE — one tick
+    # MAIN UPDATE
     # ================================================================
 
     def update(self, env: Environment, smoke: SmokeSystem,
@@ -88,116 +93,155 @@ class Civilian:
         in_smoke = local_smoke > 0.3
         in_fire = local_fire > 0.1
 
-        # ── 1. IDLE: wait until danger sensed ──
+        # ── IDLE: wait for danger ──
         if self.state == IDLE:
-            if in_fire or in_smoke or self._sense_danger(env, smoke, fire):
+            if (in_fire or in_smoke
+                    or self._sense_danger(env, smoke, fire)
+                    or self._see_others_fleeing(all_civilians)):
                 self.state = REACTING
                 self._reaction_counter = 0
-            return  # Do nothing while idle
+            return
 
-        # ── 2. REACTING: freeze, then start moving ──
+        # ── REACTING: freeze, then move ──
         if self.state == REACTING:
             self._reaction_counter += 1
             if self._reaction_counter >= self._reaction_delay:
-                self._start_fleeing(env)
-            return  # Stand still during reaction
+                self._start_moving(env)
+            return
 
-        # ── 3. Smoke damage (all active states) ──
+        # ── Rule 5: Potency damage (no recovery) ──
         if in_fire:
-            self._smoke_damage += 3.0
+            self.potency -= 3.0
         elif in_smoke:
-            self._smoke_damage += local_smoke
-        else:
-            self._smoke_damage = max(0.0, self._smoke_damage - 0.2)
+            self.potency -= local_smoke
 
-        if self._smoke_damage >= self._max_smoke_damage:
+        if self.potency <= 0:
             self.state = DEAD
             self.vel = np.zeros(2)
             return
 
-        # ── 4. Vision & speed ──
-        effective_vision = self._calc_vision(local_smoke)
-        current_speed = self._calc_speed(in_fire, in_smoke)
+        # ── Vision & speed ──
+        eff_vision = self._calc_vision(local_smoke)
+        speed = self._calc_speed(in_fire, in_smoke)
 
-        # ── 5. Opportunistic checks (any active state) ──
-        # Spot an exit?
-        if effective_vision > 0 and self.state not in (MOVING_TO_EXIT,):
-            exit_pos = self._spot_exit(env, effective_vision)
+        # ── Opportunistic: spot exit ──
+        if eff_vision > 0 and self.state not in (MOVING_TO_EXIT,):
+            exit_pos = self._spot_exit(env, eff_vision)
             if exit_pos is not None:
                 self._set_exit_target(env, exit_pos)
 
-        # Spot a civilian heading to exit? (only if wandering/wall-following)
-        if effective_vision > 0 and self.state in (WANDERING, WALL_FOLLOWING):
-            leader = self._spot_leader(all_civilians, effective_vision * 2)
-            if leader is not None:
-                self._follow_target = leader
+        # ── Rule 4: Herding (crowd direction) ──
+        if eff_vision > 0 and self.state == WANDERING:
+            crowd_dir = self._sense_crowd_direction(all_civilians, eff_vision * 3)
+            if crowd_dir is not None:
+                self._walk_dir = crowd_dir
                 self.state = FOLLOWING
 
-        # ── 6. State behavior ──
+        # ── State behaviors ──
+
         if self.state == FLEEING_ROOM:
-            self._do_follow_path(env, current_speed, fallback=WANDERING)
+            # Rule 2: follow BFS path to doorway
+            self._do_follow_path(env, speed, fallback=WANDERING)
 
         elif self.state == MOVING_TO_EXIT:
-            # Check if close enough to exit
+            # Rule 2: follow BFS path to exit
             if self._target_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._target_exit))
                 if dist < env.cell_size:
                     self.state = ESCAPED
                     return
-            self._do_follow_path(env, current_speed, fallback=WANDERING)
+            self._do_follow_path(env, speed, fallback=WANDERING)
 
         elif self.state == FOLLOWING:
-            self._do_following(env, current_speed, effective_vision)
+            # Rule 4: walk in crowd direction
+            if self._walk_dir is not None:
+                self.vel = self._walk_dir * speed
+            # Re-check crowd each tick
+            if eff_vision > 0:
+                crowd_dir = self._sense_crowd_direction(all_civilians, eff_vision * 3)
+                if crowd_dir is not None:
+                    self._walk_dir = crowd_dir
+                else:
+                    self.state = WANDERING
+                    self._walk_dir = None
+                # Can we see an exit?
+                exit_pos = self._spot_exit(env, eff_vision)
+                if exit_pos is not None:
+                    self._set_exit_target(env, exit_pos)
 
         elif self.state == WALL_FOLLOWING:
-            self._do_wall_follow(env, current_speed)
-            # Regained vision? Switch back to corridor-follow
-            if effective_vision > 0 and not in_smoke:
+            # Blind in smoke: hand-on-wall
+            self._do_wall_follow(env, speed)
+            if eff_vision > 0 and not in_smoke:
                 self.state = WANDERING
-                self._corridor_dir = None
+                self._walk_dir = None
 
         elif self.state == WANDERING:
-            if in_smoke and effective_vision == 0:
+            if in_smoke and eff_vision == 0:
                 # Blind → wall-follow
                 self.state = WALL_FOLLOWING
-                self._corridor_dir = None
-                self._do_wall_follow(env, current_speed)
+                self._do_wall_follow(env, speed)
             else:
-                self._do_corridor_follow(env, current_speed)
+                # Rule 1: random walk
+                # Rule 3: disorientation in smoke
+                self._do_random_walk(env, speed, local_smoke)
 
-        # ── 7. Apply movement ──
-        self._move(env, current_speed)
+        # ── Apply movement ──
+        self._move(env, speed)
 
     # ================================================================
     # STATE TRANSITIONS
     # ================================================================
 
-    def _start_fleeing(self, env: Environment):
-        """After reaction delay: find doorway → FLEEING_ROOM, or → WANDERING."""
+    def _start_moving(self, env):
+        """After reaction delay: if guide told us an exit, go there.
+        Otherwise find doorway or start wandering."""
+        # Did a guide tell us where the exit is?
+        if self._guide_told_exit is not None:
+            self._set_exit_target(env, self._guide_told_exit)
+            self._guide_told_exit = None
+            return
+
         doorway = self._find_doorway(env)
         if doorway is not None:
             self._waypoints = bfs_path(env, self.pos, doorway)
             self.state = FLEEING_ROOM
         else:
-            # Already in corridor or can't find one
             self.state = WANDERING
-            self._corridor_dir = None
+            self._pick_random_cardinal()
 
-    def _set_exit_target(self, env: Environment, exit_pos):
-        """Set exit as goal, compute BFS path."""
+    def _set_exit_target(self, env, exit_pos):
+        """Set exit as goal with BFS path."""
         self._target_exit = exit_pos
         self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
         self.state = MOVING_TO_EXIT
 
     # ================================================================
-    # STATE BEHAVIORS
+    # MOVEMENT RULES
     # ================================================================
 
+    def _do_random_walk(self, env, speed, smoke_density):
+        """Rule 1 + Rule 3: Random walk with disorientation in smoke.
+        Pick a cardinal direction, walk until wall. In smoke, random
+        chance to change direction (disorientation)."""
+
+        # Rule 3: Disorientation — smoke makes you lose your way
+        if smoke_density > 0.2:
+            # Higher smoke = more chance to randomly change direction
+            if self._rng.random() < smoke_density * 0.3:
+                self._pick_random_cardinal()
+
+        # No direction yet? Pick one
+        if self._walk_dir is None:
+            self._pick_random_cardinal()
+
+        self.vel = self._walk_dir * speed
+
     def _do_follow_path(self, env, speed, fallback):
-        """Follow BFS waypoints. When done, switch to fallback state."""
+        """Rule 2: Follow BFS waypoints."""
         if not self._waypoints:
             self.state = fallback
-            self._corridor_dir = None
+            self._walk_dir = None
             return
 
         target = self._waypoints[0]
@@ -208,7 +252,7 @@ class Civilian:
             self._waypoints.pop(0)
             if not self._waypoints:
                 self.state = fallback
-                self._corridor_dir = None
+                self._walk_dir = None
                 return
             target = self._waypoints[0]
             diff = target - self.pos
@@ -217,137 +261,30 @@ class Civilian:
         if dist > 0:
             self.vel = (diff / dist) * speed
 
-    def _do_following(self, env, speed, effective_vision):
-        """Walk toward another civilian. If they're gone, wander."""
-        target = self._follow_target
-        if target is None or target.state in (ESCAPED, DEAD):
-            self._follow_target = None
-            self.state = WANDERING
-            self._corridor_dir = None
-            return
-
-        diff = target.pos - self.pos
-        dist = np.linalg.norm(diff)
-        if dist > 1.0:
-            self.vel = (diff / dist) * speed
-
-        # Can we see an exit now?
-        if effective_vision > 0:
-            exit_pos = self._spot_exit(env, effective_vision)
-            if exit_pos is not None:
-                self._set_exit_target(env, exit_pos)
-
-    def _do_corridor_follow(self, env, speed):
-        """Walk along corridors using run-length detection.
-
-        Measures how far you can walk in each cardinal direction.
-        Only treats 3+ cell runs as real paths (ignores corridor width).
-        Picks a direction and commits. Turns at real junctions.
-        """
-        x, y = self.pos
-        cs = env.cell_size
-        MIN_RUN = 3
-
-        four = [
-            np.array([1.0, 0.0]),
-            np.array([-1.0, 0.0]),
-            np.array([0.0, 1.0]),
-            np.array([0.0, -1.0]),
-        ]
-
-        # Measure run-length in each direction
-        runs = {}
-        for d in four:
-            n = 0
-            cx, cy = x + d[0] * cs, y + d[1] * cs
-            while env.is_walkable(cx, cy) and n < 20:
-                n += 1
-                cx += d[0] * cs
-                cy += d[1] * cs
-            runs[(d[0], d[1])] = n
-
-        # Real paths = directions with 3+ cells of depth
-        real = [d for d in four if runs[(d[0], d[1])] >= MIN_RUN]
-
-        if not real:
-            # Tight space — try any walkable direction
-            for d in four:
-                if runs[(d[0], d[1])] >= 1:
-                    self.vel = d * speed
-                    return
-            return
-
-        # First time or reset? Pick a direction
-        if self._corridor_dir is None:
-            self._corridor_dir = real[self._rng.integers(len(real))]
-            self._corridor_ticks = 0
-
-        self._corridor_ticks += 1
-        curr = self._corridor_dir
-        curr_run = runs.get((curr[0], curr[1]), 0)
-
-        # Wall ahead?
-        if curr_run < 1:
-            # Must turn. Prefer perpendicular, avoid U-turn.
-            perp = [d for d in real
-                    if not np.allclose(d, curr) and not np.allclose(d, -curr)]
-            if not perp:
-                perp = [d for d in real if not np.allclose(d, curr)]
-            if perp:
-                self._corridor_dir = perp[self._rng.integers(len(perp))]
-            self._corridor_ticks = 0
-
-        elif curr_run <= 2:
-            # Approaching wall — turn now if there's a side path
-            perp = [d for d in real
-                    if not np.allclose(d, curr) and not np.allclose(d, -curr)]
-            if perp:
-                self._corridor_dir = perp[self._rng.integers(len(perp))]
-                self._corridor_ticks = 0
-
-        else:
-            # Path is clear. Check for real junctions.
-            perp = [d for d in real
-                    if not np.allclose(d, curr) and not np.allclose(d, -curr)]
-
-            if perp and self._corridor_ticks > 10:
-                # Real junction — 20% chance to turn
-                if self._rng.random() < 0.20:
-                    self._corridor_dir = perp[self._rng.integers(len(perp))]
-                    self._corridor_ticks = 0
-
-        self.vel = self._corridor_dir * speed
-
     def _do_wall_follow(self, env, speed):
-        """Blind in smoke: feel along wall with hand rule."""
+        """Blind in smoke: hand-on-wall rule."""
         x, y = self.pos
         cs = env.cell_size * 0.5
 
-        # Find nearest wall direction
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             if not env.is_walkable(x + dx * cs, y + dy * cs):
                 wall = np.array([dx, dy], dtype=float)
-                # Walk perpendicular to wall
                 if self._wall_hand == 1:
                     self.vel = np.array([-wall[1], wall[0]]) * speed
                 else:
                     self.vel = np.array([wall[1], -wall[0]]) * speed
                 return
 
-        # No wall nearby — walk forward until we find one
+        # No wall nearby — walk forward
         norm = np.linalg.norm(self.vel)
         if norm > 0:
             self.vel = (self.vel / norm) * speed
         else:
-            angle = self._rng.uniform(0, 2 * np.pi)
-            self.vel = np.array([np.cos(angle), np.sin(angle)]) * speed
-
-    # ================================================================
-    # MOVEMENT
-    # ================================================================
+            self._pick_random_cardinal()
+            self.vel = self._walk_dir * speed
 
     def _move(self, env, speed):
-        """Apply velocity with wall collision. Detect stuck."""
+        """Apply velocity with wall collision."""
         x, y = self.pos
         vx, vy = self.vel
 
@@ -358,8 +295,8 @@ class Civilian:
         elif env.is_walkable(x, y + vy):
             self.pos = np.array([x, y + vy])
         else:
-            # Blocked — reset corridor direction
-            self._corridor_dir = None
+            # Blocked — pick new direction
+            self._pick_random_cardinal()
 
         # Stuck detection
         moved = np.linalg.norm(self.pos - self._prev_pos)
@@ -370,18 +307,24 @@ class Civilian:
             self._prev_pos = self.pos.copy()
 
         if self._stuck_ticks >= 10:
-            self._corridor_dir = None
-            # Try random walkable direction
-            angle = self._rng.uniform(0, 2 * np.pi)
-            self.vel = np.array([np.cos(angle), np.sin(angle)]) * speed
+            self._pick_random_cardinal()
             self._stuck_ticks = 0
 
+    def _pick_random_cardinal(self):
+        """Pick a random cardinal direction (up/down/left/right)."""
+        dirs = [
+            np.array([1.0, 0.0]),
+            np.array([-1.0, 0.0]),
+            np.array([0.0, 1.0]),
+            np.array([0.0, -1.0]),
+        ]
+        self._walk_dir = dirs[self._rng.integers(4)]
+
     # ================================================================
-    # PERCEPTION (what can the civilian sense?)
+    # PERCEPTION
     # ================================================================
 
     def _calc_vision(self, smoke_density):
-        """Effective vision radius. Smoke reduces it to zero."""
         if smoke_density > 0.5:
             return 0.0
         elif smoke_density > 0.2:
@@ -389,8 +332,6 @@ class Civilian:
         return self.vision_radius
 
     def _calc_speed(self, in_fire, in_smoke):
-        """Effective speed. Fire = sprint, smoke = slow, clear = normal.
-        If following a path, only mildly slowed in smoke."""
         has_path = self.state in (FLEEING_ROOM, MOVING_TO_EXIT, FOLLOWING)
         if in_fire:
             return self.speed * 1.8
@@ -398,8 +339,23 @@ class Civilian:
             return self.speed * (0.7 if has_path else 0.3)
         return self.speed
 
+    def _see_others_fleeing(self, all_civilians):
+        """Kasereka 2018: 'when they see a person who evacuates the place,
+        they shall run towards the nearest exit door.'
+        If a non-idle civilian is within vision range, we notice the danger."""
+        for other in all_civilians:
+            if other is self:
+                continue
+            if other.state in (IDLE, REACTING, ESCAPED, DEAD):
+                continue
+            # Other civilian is actively moving (fleeing/wandering/etc.)
+            d = np.linalg.norm(self.pos - other.pos)
+            if d < self.vision_radius * 2:  # 2 cells — can see someone running nearby
+                return True
+        return False
+
     def _sense_danger(self, env, smoke, fire):
-        """Can we see/smell smoke or fire within 1 cell?"""
+        """Detect smoke/fire within 1 cell."""
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = smoke.density.shape
         for dr in range(-1, 2):
@@ -410,33 +366,45 @@ class Civilian:
                         return True
         return False
 
-    def _spot_exit(self, env, effective_vision):
-        """Find nearest exit within vision range. Returns pos or None."""
+    def _spot_exit(self, env, eff_vision):
+        """Find nearest exit within vision."""
         best, best_d = None, float("inf")
         for ex, ey in env.exits:
             d = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-            if d < effective_vision and d < best_d:
+            if d < eff_vision and d < best_d:
                 best, best_d = (ex, ey), d
         return best
 
-    def _spot_leader(self, all_civilians, radius):
-        """Find nearest civilian heading to exit."""
-        best, best_d = None, float("inf")
+    def _sense_crowd_direction(self, all_civilians, radius):
+        """Rule 4: Herding — average direction of nearby moving civilians.
+        If 2+ nearby civilians are moving, bias toward their average direction.
+        This is crowd-level herding, not 1-to-1 following (Helbing 2000)."""
+        avg_dir = np.zeros(2)
+        count = 0
+
         for other in all_civilians:
-            if other is self or other.state not in (MOVING_TO_EXIT,):
+            if other is self or other.state in (IDLE, REACTING, ESCAPED, DEAD):
                 continue
             d = np.linalg.norm(self.pos - other.pos)
-            if d < radius and d < best_d:
-                best, best_d = other, d
-        return best
+            if d < radius and d > 0:
+                other_speed = np.linalg.norm(other.vel)
+                if other_speed > 0.5:  # Only count civilians actually moving
+                    avg_dir += other.vel / other_speed
+                    count += 1
+
+        if count >= 2:
+            norm = np.linalg.norm(avg_dir)
+            if norm > 0:
+                return avg_dir / norm
+        return None
 
     # ================================================================
-    # PATHFINDING HELPERS
+    # PATHFINDING
     # ================================================================
 
     def _find_doorway(self, env):
-        """BFS to find nearest corridor cell (6+ straight-line walk).
-        Returns world-coordinate position, or None if already in corridor."""
+        """BFS to nearest corridor cell (6+ straight-line walk)."""
+        from collections import deque
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = env.grid.shape
 
@@ -452,7 +420,7 @@ class Civilian:
             return best
 
         if longest_run(gr, gc) >= 6:
-            return None  # Already in corridor
+            return None
 
         visited = {(gr, gc)}
         queue = deque([(gr, gc, 0)])

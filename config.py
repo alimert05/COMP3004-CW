@@ -20,7 +20,7 @@ CIVILIAN_NUMBER = 50
 GUIDE_POLICY = "beacon"
 
 # Enable/disable guides
-GUIDES_ENABLED = False
+GUIDES_ENABLED = True
 
 # Number of guides (None = 1 per exit)
 GUIDE_COUNT = None

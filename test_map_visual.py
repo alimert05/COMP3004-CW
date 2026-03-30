@@ -215,7 +215,7 @@ while running:
         elif civ.state == FLEEING_ROOM:
             colour = (255, 150, 50)   # orange — fleeing room
         elif civ.state == FOLLOWING:
-            colour = (255, 200, 50)   # yellow — following someone
+            colour = (255, 200, 50)   # yellow — herding (following crowd)
         elif civ.state == WALL_FOLLOWING:
             colour = (200, 100, 255)  # purple — blind, wall-following
         elif civ.state == REACTING:
@@ -289,7 +289,9 @@ while running:
     dead = sum(1 for c in civilians if c.state == DEAD)
     guides_alive = sum(1 for g in guides if g.alive)
     policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
-    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  React:{reacting}  Flee:{fleeing}  Wander:{wandering}  Wall:{wall_f}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}"
+    alive_civs = [c for c in civilians if c.state not in (ESCAPED, DEAD)]
+    avg_potency = sum(c.potency for c in alive_civs) / max(1, len(alive_civs))
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}  HP:{avg_potency:.0f}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA
