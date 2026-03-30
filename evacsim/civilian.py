@@ -78,6 +78,8 @@ class Civilian:
 
         # For sweeper guide (Phase 2)
         self.assigned_guide = None
+        self._boids_bfs_cache = []  # Cached BFS path for boids wall fallback
+        self._boids_bfs_tick = 0    # When cache was last updated
 
     # ================================================================
     # MAIN UPDATE
@@ -88,6 +90,9 @@ class Civilian:
 
         if self.state in (ESCAPED, DEAD):
             return
+
+        # Store fire grid for BFS calls within this tick
+        self._fire_grid = fire.density
 
         x, y = self.pos
         local_smoke = smoke.get_density_at(x, y)
@@ -179,14 +184,26 @@ class Civilian:
                     self._set_exit_target(env, exit_pos)
 
         elif self.state == FOLLOWING_GUIDE:
-            # Boids: follow the sweeper guide as a flock
             guide = self.assigned_guide
             if guide is None or not guide.alive or self not in guide._group:
                 self.assigned_guide = None
                 self.state = WANDERING
                 self._walk_dir = None
             else:
-                self.vel = self._boids_follow_guide(guide, all_civilians, speed, env)
+                dist_to_guide = np.linalg.norm(self.pos - guide.pos)
+
+                # Too far for too long? Give up
+                if dist_to_guide > env.cell_size * 20 and self._stuck_ticks >= 8:
+                    guide._group.remove(self)
+                    self.assigned_guide = None
+                    self.state = WANDERING
+                    self._walk_dir = None
+                else:
+                    # Hybrid BFS + Boids:
+                    # - BFS gives direction (handles walls, doorways)
+                    # - Boids separation prevents piling up
+                    self.vel = self._hybrid_boids_follow(
+                        guide, all_civilians, speed, env)
 
         elif self.state == WALL_FOLLOWING:
             # Blind in smoke: hand-on-wall
@@ -215,7 +232,6 @@ class Civilian:
     def _start_moving(self, env):
         """After reaction delay: if guide told us an exit, go there.
         Otherwise find doorway or start wandering."""
-        # Did a guide tell us where the exit is?
         if self._guide_told_exit is not None:
             self._set_exit_target(env, self._guide_told_exit)
             self._guide_told_exit = None
@@ -223,7 +239,8 @@ class Civilian:
 
         doorway = self._find_doorway(env)
         if doorway is not None:
-            self._waypoints = bfs_path(env, self.pos, doorway)
+            fg = getattr(self, '_fire_grid', None)
+            self._waypoints = bfs_path(env, self.pos, doorway, fire_grid=fg)
             self.state = FLEEING_ROOM
         else:
             self.state = WANDERING
@@ -234,13 +251,15 @@ class Civilian:
         if self.state == FOLLOWING_GUIDE:
             return
         self._target_exit = exit_pos
-        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
+        fg = getattr(self, '_fire_grid', None)
+        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos), fire_grid=fg)
         self.state = MOVING_TO_EXIT
 
     def _set_exit_target_force(self, env, exit_pos):
         """Force-set exit target (used when guide releases group)."""
         self._target_exit = exit_pos
-        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
+        fg = getattr(self, '_fire_grid', None)
+        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos), fire_grid=fg)
         self.state = MOVING_TO_EXIT
         self.assigned_guide = None
 
@@ -311,49 +330,75 @@ class Civilian:
             self._pick_random_cardinal()
             self.vel = self._walk_dir * speed
 
-    def _boids_follow_guide(self, guide, all_civilians, speed, env):
-        """Boids steering for following a sweeper guide.
-        Cohesion: steer toward guide.
-        Alignment: match guide's direction.
-        Separation: avoid overlapping group members."""
+    def _hybrid_boids_follow(self, guide, all_civilians, speed, env):
+        """Hybrid BFS + Boids for following a sweeper guide.
 
-        # Cohesion: toward guide
-        diff = guide.pos - self.pos
-        dist = np.linalg.norm(diff)
-        cohesion = diff / dist if dist > 0 else np.zeros(2)
+        Adapted from Reynolds' boids (1987) for indoor environments:
+          - COHESION: replaced with BFS pathfinding toward guide
+            (handles walls, doorways, corridors automatically)
+          - ALIGNMENT: match guide's movement direction
+          - SEPARATION: push away from nearby group members
+            (prevents piling up at doorways and corridors)
 
-        # Alignment: match guide velocity
+        BFS handles navigation. Boids handles group spacing.
+        """
+        # ── COHESION via BFS (not direct vector) ──
+        # Recompute path every 8 ticks or when cache is empty
+        if not self._boids_bfs_cache or self._stuck_ticks % 8 == 0:
+            fg = getattr(self, '_fire_grid', None)
+            self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)
+
+        # Follow BFS waypoints
+        cohesion_dir = np.zeros(2)
+        if self._boids_bfs_cache:
+            target = self._boids_bfs_cache[0]
+            diff = target - self.pos
+            d = np.linalg.norm(diff)
+            if d < env.cell_size * 0.5:
+                self._boids_bfs_cache.pop(0)
+                if self._boids_bfs_cache:
+                    target = self._boids_bfs_cache[0]
+                    diff = target - self.pos
+                    d = np.linalg.norm(diff)
+            if d > 0:
+                cohesion_dir = diff / d
+        else:
+            # No path — direct vector as fallback
+            diff = guide.pos - self.pos
+            d = np.linalg.norm(diff)
+            if d > 0:
+                cohesion_dir = diff / d
+
+        # ── ALIGNMENT: match guide's direction ──
         gv = np.linalg.norm(guide.vel)
-        alignment = guide.vel / gv if gv > 0 else np.zeros(2)
+        alignment_dir = guide.vel / gv if gv > 0.1 else np.zeros(2)
 
-        # Separation: push away from nearby group members
-        separation = np.zeros(2)
+        # ── SEPARATION: push away from nearby group members ──
+        separation_dir = np.zeros(2)
         sep_r = env.cell_size * 1.5
-        count = 0
+        sep_count = 0
         for other in all_civilians:
             if other is self or other.state != FOLLOWING_GUIDE:
                 continue
             if other.assigned_guide is not guide:
                 continue
-            d = self.pos - other.pos
-            dn = np.linalg.norm(d)
+            diff_sep = self.pos - other.pos
+            dn = np.linalg.norm(diff_sep)
             if 0 < dn < sep_r:
-                separation += (d / dn) * (1.0 - dn / sep_r)
-                count += 1
-        if count > 0:
-            separation /= count
+                separation_dir += (diff_sep / dn) * (1.0 - dn / sep_r)
+                sep_count += 1
+        if sep_count > 0:
+            separation_dir /= sep_count
 
-        # Weighted sum
-        steer = cohesion * 1.0 + alignment * 0.5 + separation * 1.5
+        # ── Combine (weights from lecture: alignment*1, cohesion*0.1, separation*2)
+        # Adjusted for leader-following: cohesion strongest (follow the guide)
+        steer = cohesion_dir * 1.0 + alignment_dir * 0.5 + separation_dir * 1.5
+
         norm = np.linalg.norm(steer)
         if norm > 0:
             steer = (steer / norm) * speed
         else:
-            steer = cohesion * speed
-
-        # Too far from guide? Rush toward them
-        if dist > env.cell_size * 5:
-            steer = cohesion * speed * 1.3
+            steer = cohesion_dir * speed
 
         return steer
 

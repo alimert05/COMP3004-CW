@@ -19,46 +19,69 @@ from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
 
 
-def bfs_path(env: Environment, start_world, goal_world):
+def bfs_path(env: Environment, start_world, goal_world, fire_grid=None):
     """Find a path from start to goal using BFS on the grid.
+
+    If fire_grid is provided, first tries to find a path avoiding fire
+    cells (density > 0.3). If no safe path exists, retries allowing fire.
+    This way agents avoid fire when possible but can still escape through
+    it as a last resort.
+
     Returns a list of world-coordinate waypoints, or empty list if no path."""
-    sr, sc = env.world_to_grid(start_world[0], start_world[1])
-    gr, gc = env.world_to_grid(goal_world[0], goal_world[1])
-    rows, cols = env.grid.shape
 
-    if sr == gr and sc == gc:
-        return []
+    def _bfs(avoid_fire):
+        sr, sc = env.world_to_grid(start_world[0], start_world[1])
+        gr, gc = env.world_to_grid(goal_world[0], goal_world[1])
+        rows, cols = env.grid.shape
 
-    visited = {(sr, sc): None}  # cell -> parent cell
-    queue = deque([(sr, sc)])
+        if sr == gr and sc == gc:
+            return []
 
-    while queue:
-        r, c = queue.popleft()
+        visited = {(sr, sc): None}
+        queue = deque([(sr, sc)])
 
-        if r == gr and c == gc:
-            # Reconstruct path
-            path = []
-            current = (r, c)
-            while current is not None:
-                path.append(current)
-                current = visited[current]
-            path.reverse()
+        while queue:
+            r, c = queue.popleft()
 
-            # Convert grid cells to world coordinates (skip the start cell)
-            waypoints = []
-            for pr, pc in path[1:]:
-                wx, wy = env.grid_to_world(pr, pc)
-                waypoints.append(np.array([wx, wy], dtype=float))
-            return waypoints
+            if r == gr and c == gc:
+                path = []
+                current = (r, c)
+                while current is not None:
+                    path.append(current)
+                    current = visited[current]
+                path.reverse()
 
-        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
-                if env.grid[nr, nc] != CellType.WALL:
+                waypoints = []
+                for pr, pc in path[1:]:
+                    wx, wy = env.grid_to_world(pr, pc)
+                    waypoints.append(np.array([wx, wy], dtype=float))
+                return waypoints
+
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                    if env.grid[nr, nc] == CellType.WALL:
+                        continue
+                    # Avoid fire cells if requested
+                    if avoid_fire and fire_grid is not None:
+                        if fire_grid[nr, nc] > 0.3:
+                            continue
                     visited[(nr, nc)] = (r, c)
                     queue.append((nr, nc))
 
-    return []  # No path found
+        return None  # No path (None = truly no path, [] = already there)
+
+    # First try: avoid fire
+    if fire_grid is not None:
+        result = _bfs(avoid_fire=True)
+        if result is not None:
+            return result
+        # No safe path — retry allowing fire (last resort)
+        result = _bfs(avoid_fire=False)
+        return result if result is not None else []
+    else:
+        result = _bfs(avoid_fire=False)
+        return result if result is not None else []
 
 
 class Guide:
@@ -114,6 +137,9 @@ class Guide:
         if not self.alive:
             return
 
+        # Store fire grid for fire-aware BFS
+        self._fire_grid = fire.density
+
         # Check fire damage (guides resist smoke but not fire)
         local_fire = fire.get_density_at(self.pos[0], self.pos[1])
         local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
@@ -146,7 +172,8 @@ class Guide:
                 best_exit = np.array([ex, ey], dtype=float)
 
         if best_exit is not None:
-            self._escape_waypoints = bfs_path(env, self.pos, best_exit)
+            fg = getattr(self, '_fire_grid', None)
+            self._escape_waypoints = bfs_path(env, self.pos, best_exit, fire_grid=fg)
 
     def _do_self_evacuation(self, env: Environment) -> bool:
         """Follow escape path to exit. Returns True if currently self-evacuating."""
@@ -606,10 +633,14 @@ class SweeperGuide(Guide):
     # ── Recruit & release ──
 
     def _recruit_nearby(self, env, smoke, civilians):
-        """Add nearby civilians to group."""
+        """Add nearby civilians to group.
+        Uses SMALLER radius than broadcast — guide needs to be close enough
+        that civilians can physically follow through doorways."""
         if len(self._group) >= self._max_group:
             return
-        radius = self.get_broadcast_radius(smoke)
+        # Recruit radius: 4 cells (40 units) — much smaller than broadcast (80)
+        # Civilians need to be close enough to actually follow
+        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
 
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE)
@@ -665,14 +696,39 @@ class SweeperGuide(Guide):
                 best_exit = (ex, ey)
         self._escort_exit = best_exit
         if best_exit:
-            self._waypoints = bfs_path(env, self.pos, np.array(best_exit))
+            fg = getattr(self, '_fire_grid', None)
+            self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=fg)
 
     def _release_group_at_exit(self, env):
-        """Release group at exit — they get BFS path to exit."""
-        from evacsim.civilian import FOLLOWING_GUIDE
+        """Release group at exit. Civilians near the guide OR near the exit
+        get the exit target. Civilians far from both go back to wandering.
+
+        The guide physically led them here — if they kept up with the guide,
+        they deserve to know where the exit is."""
+        import numpy as np
+        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
+
+        near = []
+        far = []
+
         for civ in self._group:
-            if civ.state == FOLLOWING_GUIDE:
-                civ._set_exit_target_force(env, self._escort_exit)
+            if civ.state != FOLLOWING_GUIDE:
+                continue
+            dist_to_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
+            dist_to_guide = np.linalg.norm(civ.pos - self.pos)
+            # Near enough: within 8 cells of exit OR within 5 cells of guide
+            if dist_to_exit < env.cell_size * 8 or dist_to_guide < env.cell_size * 5:
+                near.append(civ)
+            else:
+                far.append(civ)
+
+        for civ in near:
+            civ._set_exit_target_force(env, self._escort_exit)
+
+        for civ in far:
+            civ.assigned_guide = None
+            civ.state = WANDERING
+
         self._group.clear()
 
     def _release_group_no_exit(self):
@@ -694,7 +750,8 @@ class SweeperGuide(Guide):
         if not self._patrol_route:
             return
         self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
-        self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx])
+        fg = getattr(self, '_fire_grid', None)
+        self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg)
 
 
 def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
