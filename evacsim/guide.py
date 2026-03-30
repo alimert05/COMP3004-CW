@@ -756,35 +756,111 @@ def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
 
 
 # ════════════════════════════════════════════════════════════════════
-# CONGESTION-AWARE ROUTER — patrols + per-civilian optimal exit
+# CONGESTION-AWARE ROUTER — corridor junction controller
 # ════════════════════════════════════════════════════════════════════
+
+def _find_junctions(env: Environment):
+    """Find corridor junction cells — cells where 3+ cardinal directions
+    are walkable. These are T-junctions, crossroads, and doorway openings.
+
+    Junctions are the decision points where civilians choose which way
+    to go. Router positions here to direct traffic."""
+    rows, cols = env.grid.shape
+    junctions = []
+
+    for r in range(1, rows - 1):
+        for c in range(1, cols - 1):
+            if env.grid[r, c] == CellType.WALL:
+                continue
+            # Count walkable cardinal neighbours
+            open_dirs = 0
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                if env.grid[r + dr, c + dc] != CellType.WALL:
+                    open_dirs += 1
+            # Junction = 3+ open directions (T-junction or crossroad)
+            if open_dirs >= 3:
+                wx, wy = env.grid_to_world(r, c)
+                junctions.append(np.array([wx, wy], dtype=float))
+
+    # De-duplicate: keep junctions at least 3 cells apart
+    if not junctions:
+        return junctions
+    filtered = [junctions[0]]
+    min_dist = env.cell_size * 3
+    for j in junctions[1:]:
+        if all(np.linalg.norm(j - f) >= min_dist for f in filtered):
+            filtered.append(j)
+    return filtered
+
+
+def _rank_junctions_by_centrality(junctions, exits, env):
+    """Rank junctions by how centrally located they are.
+    Centrality = sum of BFS distances to all exits (lower = more central).
+    Most central junctions see the most traffic."""
+    if not junctions:
+        return []
+
+    scored = []
+    for j in junctions:
+        total_dist = 0
+        for ex, ey in exits:
+            total_dist += np.hypot(j[0] - ex, j[1] - ey)
+        scored.append((total_dist, j))
+
+    scored.sort(key=lambda x: x[0])  # Most central first (lowest total distance)
+    return [j for _, j in scored]
+
 
 class RouterGuide(Guide):
     """
-    Congestion-Aware Router: patrols building like Sweeper, but instead
-    of collecting groups, tells each civilian their PERSONAL optimal exit
-    based on distance + real-time congestion data.
+    Congestion-Aware Router: positions at corridor JUNCTIONS and
+    directs traffic based on real-time exit congestion.
 
-    Score per exit = distance + (congestion_count * penalty).
-    Each civilian gets the exit with lowest score for them.
+    Fundamentally different from other policies:
+      - Beacon: STATIC at exits
+      - Sweeper: MOBILE through rooms, collects groups
+      - Router: STRATEGIC at junctions, manages corridor FLOW
+
+    Behaviour:
+      1. Find all corridor junctions (3+ open directions)
+      2. Walk to most central junction (decision point with most traffic)
+      3. Stand there, broadcast per-civilian optimal exit
+      4. Every 30 ticks: re-evaluate — if congestion shifts, move to a
+         better junction closer to the congested area
+      5. Can REDIRECT civilians already heading to wrong exit
+
+    Intelligence:
+      - Per-civilian exit scoring: distance + congestion_penalty + smoke_penalty
+      - Dynamic repositioning based on real-time flow data
+      - Smoke-aware: penalizes exits with heavy smoke on the path
     """
 
     def __init__(self, x: float, y: float, speed: float,
                  env: Environment, rng: np.random.Generator,
-                 patrol_points: list = None):
+                 assigned_junctions: list = None):
         super().__init__(x, y, speed, env, rng)
 
-        all_pts = patrol_points if patrol_points else _find_patrol_points(env)
-        self._patrol_route = _balanced_patrol_order(self.pos, all_pts)
-        self._patrol_idx = 0
-        self._waypoints = []
+        # Get junctions for this guide
+        if assigned_junctions:
+            self._junctions = assigned_junctions
+        else:
+            all_j = _find_junctions(env)
+            self._junctions = _rank_junctions_by_centrality(
+                all_j, env.exits, env)
 
+        # Current junction we're standing at
+        self._current_junction_idx = 0
+        self._waypoints = []
+        self._at_junction = False
+
+        # Congestion data
         self._exit_counts = {}
-        self._eval_interval = 15
+        self._eval_interval = 80  # Stay at junction long before reconsidering
         self._eval_counter = 0
 
-        if self._patrol_route:
-            self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
+        # Walk to first (most central) junction
+        if self._junctions:
+            self._waypoints = bfs_path(env, self.pos, self._junctions[0])
 
     def update(self, env, smoke, fire, civilians):
         super().update(env, smoke, fire, civilians)
@@ -793,25 +869,30 @@ class RouterGuide(Guide):
         if self._do_self_evacuation(env):
             return
 
+        # Periodic: update congestion + maybe reposition
         self._eval_counter += 1
         if self._eval_counter >= self._eval_interval:
             self._eval_counter = 0
             self._update_congestion(civilians)
+            self._maybe_reposition(env, smoke, civilians)
 
+        # ALWAYS broadcast to nearby civilians — even while walking to junction
+        # This ensures we help every civilian we pass, not just at junctions
         if self._eval_counter % 3 == 0:
-            self._smart_broadcast(env, smoke, civilians)
+            self._broadcast_optimal_exits(env, smoke, civilians)
 
-        if not self._waypoints:
-            if self._patrol_route:
-                self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
-                self._waypoints = bfs_path(
-                    env, self.pos, self._patrol_route[self._patrol_idx])
+        # Movement — walk to junction, then STAY there
+        if not self._at_junction:
             if not self._waypoints:
+                self._at_junction = True
                 self.vel = np.zeros(2)
+            else:
+                self._follow_path(env)
         else:
-            self._follow_path(env)
+            self.vel = np.zeros(2)  # Stand at junction
 
     def _update_congestion(self, civilians):
+        """Count civilians heading to each exit + queued at each exit."""
         from evacsim.civilian import MOVING_TO_EXIT, QUEUED
         self._exit_counts = {(ex, ey): 0 for ex, ey in self.known_exits}
         for civ in civilians:
@@ -827,29 +908,111 @@ class RouterGuide(Guide):
             if best_exit and best_d < 20:
                 self._exit_counts[best_exit] += 1
 
-    def _best_exit_for(self, civ_pos):
+    def _maybe_reposition(self, env, smoke, civilians):
+        """Check if we should move to a different junction.
+
+        Move if:
+          - Current junction is in heavy smoke
+          - A different junction is closer to the congestion hotspot
+          - A different junction has more un-helped civilians nearby
+        """
+        if not self._junctions or len(self._junctions) < 2:
+            return
+
+        # Score each junction
+        best_idx = self._current_junction_idx
+        best_score = float("inf")
+
+        # Find the most congested exit
+        if self._exit_counts:
+            most_congested = max(self._exit_counts, key=self._exit_counts.get)
+            max_congestion = self._exit_counts[most_congested]
+        else:
+            most_congested = None
+            max_congestion = 0
+
+        from evacsim.civilian import ESCAPED, DEAD, IDLE, MOVING_TO_EXIT, QUEUED
+
+        for i, junc in enumerate(self._junctions):
+            # Penalty for smoke at junction
+            smoke_at = smoke.get_density_at(junc[0], junc[1])
+            smoke_penalty = smoke_at * 200
+
+            # Bonus for being near congested exit (to intercept traffic)
+            congestion_bonus = 0
+            if most_congested and max_congestion > 3:
+                dist_to_congested = np.hypot(
+                    junc[0] - most_congested[0], junc[1] - most_congested[1])
+                congestion_bonus = -dist_to_congested * 0.5  # Negative = good
+
+            # Bonus for un-helped civilians nearby
+            nearby_unhelpful = 0
+            for civ in civilians:
+                if civ.state in (ESCAPED, DEAD, IDLE, MOVING_TO_EXIT, QUEUED):
+                    continue
+                d = np.linalg.norm(civ.pos - junc)
+                if d < self.broadcast_radius:
+                    nearby_unhelpful += 1
+            civilian_bonus = -nearby_unhelpful * 50  # More civilians = better
+
+            score = smoke_penalty + congestion_bonus + civilian_bonus
+
+            if score < best_score:
+                best_score = score
+                best_idx = i
+
+        # Reposition if a significantly better junction exists
+        if best_idx != self._current_junction_idx:
+            self._current_junction_idx = best_idx
+            self._waypoints = bfs_path(
+                env, self.pos, self._junctions[best_idx])
+            self._at_junction = False
+
+    def _best_exit_for(self, civ_pos, smoke):
+        """Find optimal exit for a civilian. Considers:
+        1. BFS distance from civilian to exit
+        2. Congestion at exit (how many already heading there)
+        3. Smoke on the path (penalize smoky exits)"""
         best_exit, best_score = None, float("inf")
+
         for ex, ey in self.known_exits:
+            # Distance
             dist = np.hypot(civ_pos[0] - ex, civ_pos[1] - ey)
-            score = dist + self._exit_counts.get((ex, ey), 0) * 30.0
+
+            # Congestion penalty
+            congestion = self._exit_counts.get((ex, ey), 0)
+            congestion_penalty = congestion * 30.0
+
+            # Smoke penalty: sample smoke at exit location
+            smoke_at_exit = smoke.get_density_at(ex, ey)
+            smoke_penalty = smoke_at_exit * 100.0
+
+            score = dist + congestion_penalty + smoke_penalty
+
             if score < best_score:
                 best_score = score
                 best_exit = (ex, ey)
+
         return best_exit
 
-    def _smart_broadcast(self, env, smoke, civilians):
+    def _broadcast_optimal_exits(self, env, smoke, civilians):
+        """Tell each nearby civilian their personal optimal exit."""
         radius = self.get_broadcast_radius(smoke)
+
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE, QUEUED)
+
         for civ in civilians:
             if civ.state in (ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
             dist = np.linalg.norm(civ.pos - self.pos)
             if dist >= radius:
                 continue
-            optimal = self._best_exit_for(civ.pos)
+
+            optimal = self._best_exit_for(civ.pos, smoke)
             if optimal is None:
                 continue
+
             if civ.state == IDLE:
                 civ.state = REACTING
                 civ._reaction_counter = 0
@@ -859,6 +1022,7 @@ class RouterGuide(Guide):
                 civ._reaction_delay = min(civ._reaction_delay, 5)
                 civ._guide_told_exit = optimal
             elif civ.state in (MOVING_TO_EXIT, QUEUED):
+                # Redirect only if new exit is 20%+ better
                 if civ._target_exit is not None:
                     cur = civ._target_exit
                     cur_s = (np.hypot(civ.pos[0] - cur[0], civ.pos[1] - cur[1])
@@ -872,30 +1036,41 @@ class RouterGuide(Guide):
 
 
 def spawn_router_guides(env, n_guides, speed=2.0, seed=77):
-    """Spawn router guides with territory splitting (like sweeper)."""
+    """Spawn router guides at exits, each assigned to different junctions.
+
+    Junctions are split by territory so guides don't overlap.
+    Each guide gets the most central junctions in their territory."""
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
-    all_points = _find_patrol_points(env)
-    if not all_points:
-        return []
+    all_junctions = _find_junctions(env)
 
-    center_y, center_x = env.height / 2.0, env.width / 2.0
+    if not all_junctions:
+        # Fallback: no junctions found, use patrol points
+        all_junctions = _find_patrol_points(env)
+
+    ranked = _rank_junctions_by_centrality(all_junctions, env.exits, env)
+
+    # Split junctions into territories
+    center_y = env.height / 2.0
+    center_x = env.width / 2.0
+
     territories = [[] for _ in range(n_guides)]
     if n_guides == 1:
-        territories[0] = all_points
+        territories[0] = ranked
     elif n_guides == 2:
-        for p in all_points:
-            territories[0 if p[1] < center_y else 1].append(p)
+        for j in ranked:
+            territories[0 if j[1] < center_y else 1].append(j)
     else:
-        for p in all_points:
-            idx = (0 if p[0] < center_x else 1) + (0 if p[1] < center_y else 2)
-            territories[idx % n_guides].append(p)
+        for j in ranked:
+            idx = (0 if j[0] < center_x else 1) + (0 if j[1] < center_y else 2)
+            territories[idx % n_guides].append(j)
 
     guides = []
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
-        pts = territories[i] if territories[i] else all_points
-        pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
-        guide = RouterGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted)
+        juncs = territories[i] if territories[i] else ranked
+        # Re-rank by centrality within territory
+        juncs = _rank_junctions_by_centrality(juncs, env.exits, env)
+        guide = RouterGuide(ex, ey, speed, env, rng, assigned_junctions=juncs)
         guides.append(guide)
     return guides
