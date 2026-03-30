@@ -382,3 +382,374 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
         guides.append(guide)
 
     return guides
+
+
+# ════════════════════════════════════════════════════════════════════
+# SWEEPER GUIDE — collect-and-escort with boids
+# ════════════════════════════════════════════════════════════════════
+
+def _find_patrol_points(env: Environment):
+    """Find patrol points using room detection + grid scan.
+
+    Uses env.detect_rooms() to get actual room centers, then adds
+    corridor points via grid scan. This ensures every room in the
+    building gets a patrol point regardless of grid alignment."""
+    rows, cols = env.grid.shape
+    points = []
+
+    # 1. Add center of each detected room
+    try:
+        rooms = env.detect_rooms()
+        for room_cells in rooms:
+            if not room_cells:
+                continue
+            # Find center of room
+            avg_r = sum(r for r, c in room_cells) / len(room_cells)
+            avg_c = sum(c for r, c in room_cells) / len(room_cells)
+            # Find the walkable cell nearest to center
+            best, best_d = None, float("inf")
+            for r, c in room_cells:
+                d = abs(r - avg_r) + abs(c - avg_c)
+                if d < best_d:
+                    best_d = d
+                    best = (r, c)
+            if best:
+                wx, wy = env.grid_to_world(best[0], best[1])
+                points.append(np.array([wx, wy], dtype=float))
+    except Exception:
+        pass  # Fall back to grid scan only
+
+    # 2. Add corridor points via grid scan (every 5 rows for better coverage)
+    for r in range(2, rows - 2, 5):
+        for c in range(2, cols - 2, 10):
+            if env.grid[r, c] != CellType.WALL:
+                wx, wy = env.grid_to_world(r, c)
+                points.append(np.array([wx, wy], dtype=float))
+
+    # De-duplicate: remove points within 4 cells of each other
+    if not points:
+        return points
+    filtered = [points[0]]
+    min_dist = env.cell_size * 4
+    for p in points[1:]:
+        if all(np.linalg.norm(p - f) >= min_dist for f in filtered):
+            filtered.append(p)
+    return filtered
+
+
+def _balanced_patrol_order(start_pos, waypoints):
+    """Order waypoints so the guide alternates between different areas.
+
+    Split points into "above start" and "below start" (by y-coordinate),
+    then interleave them. Within each group, order by nearest-first.
+    This ensures the guide visits both halves of the building, not just
+    the nearest half."""
+    if not waypoints:
+        return []
+
+    sy = start_pos[1]
+    above = [p for p in waypoints if p[1] < sy - 5]  # Above start (lower y)
+    below = [p for p in waypoints if p[1] > sy + 5]   # Below start (higher y)
+    middle = [p for p in waypoints if abs(p[1] - sy) <= 5]  # Near start
+
+    def greedy_sort(pts, start):
+        remaining = list(pts)
+        ordered = []
+        current = start.copy()
+        while remaining:
+            best_idx = min(range(len(remaining)),
+                           key=lambda i: np.linalg.norm(current - remaining[i]))
+            ordered.append(remaining.pop(best_idx))
+            current = ordered[-1]
+        return ordered
+
+    above_sorted = greedy_sort(above, start_pos)
+    below_sorted = greedy_sort(below, start_pos)
+    middle_sorted = greedy_sort(middle, start_pos)
+
+    # Interleave: above point, below point, above, below...
+    # Start with middle points, then alternate
+    result = list(middle_sorted)
+    for i in range(max(len(above_sorted), len(below_sorted))):
+        if i < len(above_sorted):
+            result.append(above_sorted[i])
+        if i < len(below_sorted):
+            result.append(below_sorted[i])
+
+    return result
+
+
+class SweeperGuide(Guide):
+    """
+    Sweeper policy: collect civilians into a group, escort them to exit.
+
+    1. PATROL: walk through building visiting rooms via BFS
+    2. COLLECT: at each room, recruit nearby civilians (up to max_group)
+    3. ESCORT: lead group to nearest exit; civilians use boids to follow
+    4. RELEASE: at exit, civilians get BFS path to exit and leave group
+    5. RETURN: go back for more
+
+    Spawns from exits (like real firefighters entering the building).
+    """
+
+    COLLECTING = "collecting"
+    ESCORTING = "escorting"
+    RETURNING = "returning"
+
+    def __init__(self, x: float, y: float, speed: float,
+                 env: Environment, rng: np.random.Generator,
+                 patrol_points: list = None, max_group: int = 8):
+        super().__init__(x, y, speed, env, rng)
+
+        self._group = []
+        self._max_group = max_group
+
+        # Build patrol route
+        all_pts = patrol_points if patrol_points else _find_patrol_points(env)
+        self._patrol_route = _balanced_patrol_order(self.pos, all_pts)
+        self._patrol_idx = 0
+
+        self._waypoints = []
+        self._phase = self.COLLECTING
+
+        # Wait at each patrol point to collect civilians
+        self._wait_ticks = 20
+        self._wait_counter = 0
+        self._waiting = False
+
+        # Target exit for escorting
+        self._escort_exit = None
+
+        # Start patrol
+        if self._patrol_route:
+            self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
+
+    def update(self, env: Environment, smoke: SmokeSystem,
+               fire: FireSystem, civilians: list) -> None:
+        super().update(env, smoke, fire, civilians)
+        if not self.alive:
+            self._release_group_no_exit()
+            return
+
+        if self._do_self_evacuation(env):
+            self._release_group_no_exit()
+            return
+
+        self._clean_group()
+
+        # Always recruit nearby civilians while moving
+        self._recruit_nearby(env, smoke, civilians)
+
+        if self._phase == self.COLLECTING:
+            self._do_collecting(env, smoke, civilians)
+        elif self._phase == self.ESCORTING:
+            self._do_escorting(env, smoke, civilians)
+        elif self._phase == self.RETURNING:
+            self._do_returning(env, smoke, civilians)
+
+    # ── Phase behaviors ──
+
+    def _do_collecting(self, env, smoke, civilians):
+        """Patrol rooms, collect civilians."""
+        if len(self._group) >= self._max_group:
+            self._start_escort(env)
+            return
+
+        if self._waiting:
+            self._wait_counter += 1
+            if self._wait_counter >= self._wait_ticks:
+                self._waiting = False
+                if self._group:
+                    # Got some people — check if more nearby
+                    if self._count_recruitable(env, smoke, civilians) == 0:
+                        self._start_escort(env)
+                        return
+                # Next patrol point
+                self._advance_patrol(env)
+            return
+
+        if not self._waypoints:
+            self._waiting = True
+            self._wait_counter = 0
+            self.vel = np.zeros(2)
+        else:
+            self._follow_path(env)
+
+    def _do_escorting(self, env, smoke, civilians):
+        """Lead group to exit."""
+        if not self._waypoints:
+            if self._escort_exit is not None:
+                dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
+                if dist < env.cell_size * 2:
+                    self._release_group_at_exit(env)
+                    self._phase = self.RETURNING
+                    self._advance_patrol(env)
+                    return
+            self.vel = np.zeros(2)
+        else:
+            self._follow_path(env)
+
+    def _do_returning(self, env, smoke, civilians):
+        """Go back for more civilians."""
+        if len(self._group) >= self._max_group:
+            self._start_escort(env)
+            return
+
+        if not self._waypoints:
+            self._phase = self.COLLECTING
+            self._waiting = True
+            self._wait_counter = 0
+            self.vel = np.zeros(2)
+        else:
+            self._follow_path(env)
+
+    # ── Recruit & release ──
+
+    def _recruit_nearby(self, env, smoke, civilians):
+        """Add nearby civilians to group."""
+        if len(self._group) >= self._max_group:
+            return
+        radius = self.get_broadcast_radius(smoke)
+
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
+
+        for civ in civilians:
+            if len(self._group) >= self._max_group:
+                break
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius:
+                # Wake up idle/reacting civilians
+                if civ.state == IDLE:
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                if civ.state == REACTING:
+                    # Speed up reaction and wait for them
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    continue  # Don't add to group until they're ready to move
+
+                # Active civilian — add to group
+                self._group.append(civ)
+                civ.assigned_guide = self
+                civ.state = FOLLOWING_GUIDE
+
+    def _count_recruitable(self, env, smoke, civilians):
+        """Count recruitable civilians nearby."""
+        radius = self.get_broadcast_radius(smoke)
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, FOLLOWING_GUIDE)
+        count = 0
+        for civ in civilians:
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            if np.linalg.norm(civ.pos - self.pos) < radius:
+                count += 1
+        return count
+
+    def _start_escort(self, env):
+        """Begin leading group to nearest exit."""
+        self._phase = self.ESCORTING
+        best_exit, best_d = None, float("inf")
+        for ex, ey in self.known_exits:
+            d = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+            if d < best_d:
+                best_d = d
+                best_exit = (ex, ey)
+        self._escort_exit = best_exit
+        if best_exit:
+            self._waypoints = bfs_path(env, self.pos, np.array(best_exit))
+
+    def _release_group_at_exit(self, env):
+        """Release group at exit — they get BFS path to exit."""
+        from evacsim.civilian import FOLLOWING_GUIDE
+        for civ in self._group:
+            if civ.state == FOLLOWING_GUIDE:
+                civ._set_exit_target_force(env, self._escort_exit)
+        self._group.clear()
+
+    def _release_group_no_exit(self):
+        """Release group without exit info (guide died/evacuating)."""
+        from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
+        for civ in self._group:
+            if civ.state == FOLLOWING_GUIDE:
+                civ.assigned_guide = None
+                civ.state = WANDERING
+        self._group.clear()
+
+    def _clean_group(self):
+        """Remove dead/escaped civilians from group."""
+        from evacsim.civilian import ESCAPED, DEAD
+        self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
+
+    def _advance_patrol(self, env):
+        """Move to next patrol point."""
+        if not self._patrol_route:
+            return
+        self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
+        self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx])
+
+
+def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
+                         seed: int = 77) -> list[SweeperGuide]:
+    """Spawn sweeper guides from exits. Each covers a different territory.
+
+    Splits patrol points geographically so guides don't overlap:
+    - 2 guides: one covers top half, one covers bottom half
+    - 4 guides: each covers a quadrant
+    This ensures the whole building gets coverage."""
+    rng = np.random.default_rng(seed)
+    exits = list(env.exits)
+    all_points = _find_patrol_points(env)
+
+    if not all_points:
+        return []
+
+    # Find map center
+    center_y = env.height / 2.0
+    center_x = env.width / 2.0
+
+    # Split points into territories based on number of guides
+    territories = [[] for _ in range(n_guides)]
+
+    if n_guides == 1:
+        territories[0] = all_points
+    elif n_guides == 2:
+        # Top half / bottom half
+        for p in all_points:
+            if p[1] < center_y:
+                territories[0].append(p)
+            else:
+                territories[1].append(p)
+    elif n_guides >= 3:
+        # Quadrants: top-left, top-right, bottom-left, bottom-right
+        for p in all_points:
+            if p[1] < center_y:
+                if p[0] < center_x:
+                    territories[0 % n_guides].append(p)
+                else:
+                    territories[1 % n_guides].append(p)
+            else:
+                if p[0] < center_x:
+                    territories[2 % n_guides].append(p)
+                else:
+                    territories[3 % n_guides].append(p)
+
+    guides = []
+    for i in range(n_guides):
+        ex, ey = exits[i % len(exits)]
+        # Get this guide's territory, fall back to all points if empty
+        pts = territories[i] if territories[i] else all_points
+        # Order: farthest points first (so guide goes deep into building first)
+        pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
+        guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted)
+        guides.append(guide)
+
+    return guides

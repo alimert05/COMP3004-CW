@@ -13,12 +13,12 @@ from evacsim.civilian import (
     WANDERING,
     WALL_FOLLOWING,
     FOLLOWING,
+    FOLLOWING_GUIDE,
     MOVING_TO_EXIT,
     ESCAPED,
     DEAD,
 )
-from evacsim.guide import spawn_beacon_guides
-# Future: from evacsim.guide import spawn_sweeper_guides, spawn_router_guides
+from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides
 
 
 # =====================================================================
@@ -105,8 +105,8 @@ if GUIDES_ENABLED:
     n = GUIDE_COUNT if GUIDE_COUNT is not None else len(env.exits)
     if GUIDE_POLICY == "beacon":
         guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
-    # elif GUIDE_POLICY == "sweeper":
-    #     guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77)
+    elif GUIDE_POLICY == "sweeper":
+        guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77)
     # elif GUIDE_POLICY == "router":
     #     guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77)
 
@@ -214,6 +214,8 @@ while running:
             colour = (50, 220, 50)    # green — heading to exit
         elif civ.state == FLEEING_ROOM:
             colour = (255, 150, 50)   # orange — fleeing room
+        elif civ.state == FOLLOWING_GUIDE:
+            colour = (0, 200, 200)    # cyan — in sweeper's group (boids)
         elif civ.state == FOLLOWING:
             colour = (255, 200, 50)   # yellow — herding (following crowd)
         elif civ.state == WALL_FOLLOWING:
@@ -291,7 +293,8 @@ while running:
     policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
     alive_civs = [c for c in civilians if c.state not in (ESCAPED, DEAD)]
     avg_potency = sum(c.potency for c in alive_civs) / max(1, len(alive_civs))
-    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Follow:{following}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}  HP:{avg_potency:.0f}"
+    in_group = sum(1 for c in civilians if c.state == FOLLOWING_GUIDE)
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Follow:{following}  Group:{in_group}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}  HP:{avg_potency:.0f}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA

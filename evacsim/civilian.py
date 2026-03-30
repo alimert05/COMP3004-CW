@@ -32,9 +32,10 @@ FLEEING_ROOM = 2    # Following BFS path to corridor doorway
 WANDERING = 3       # Random walk, no goal
 WALL_FOLLOWING = 4  # Blind in smoke, hand-on-wall
 FOLLOWING = 5       # Herding — biased toward crowd direction
-MOVING_TO_EXIT = 6  # Following BFS path to exit
-ESCAPED = 7
-DEAD = 8
+FOLLOWING_GUIDE = 6 # In sweeper's group, using boids to follow
+MOVING_TO_EXIT = 7  # Following BFS path to exit
+ESCAPED = 8
+DEAD = 9
 
 
 class Civilian:
@@ -124,8 +125,8 @@ class Civilian:
         eff_vision = self._calc_vision(local_smoke)
         speed = self._calc_speed(in_fire, in_smoke)
 
-        # ── Opportunistic: spot exit ──
-        if eff_vision > 0 and self.state not in (MOVING_TO_EXIT,):
+        # ── Opportunistic: spot exit (not if following a guide) ──
+        if eff_vision > 0 and self.state not in (MOVING_TO_EXIT, FOLLOWING_GUIDE):
             exit_pos = self._spot_exit(env, eff_vision)
             if exit_pos is not None:
                 self._set_exit_target(env, exit_pos)
@@ -169,6 +170,16 @@ class Civilian:
                 if exit_pos is not None:
                     self._set_exit_target(env, exit_pos)
 
+        elif self.state == FOLLOWING_GUIDE:
+            # Boids: follow the sweeper guide as a flock
+            guide = self.assigned_guide
+            if guide is None or not guide.alive or self not in guide._group:
+                self.assigned_guide = None
+                self.state = WANDERING
+                self._walk_dir = None
+            else:
+                self.vel = self._boids_follow_guide(guide, all_civilians, speed, env)
+
         elif self.state == WALL_FOLLOWING:
             # Blind in smoke: hand-on-wall
             self._do_wall_follow(env, speed)
@@ -211,10 +222,19 @@ class Civilian:
             self._pick_random_cardinal()
 
     def _set_exit_target(self, env, exit_pos):
-        """Set exit as goal with BFS path."""
+        """Set exit as goal with BFS path. Won't override FOLLOWING_GUIDE."""
+        if self.state == FOLLOWING_GUIDE:
+            return
         self._target_exit = exit_pos
         self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
         self.state = MOVING_TO_EXIT
+
+    def _set_exit_target_force(self, env, exit_pos):
+        """Force-set exit target (used when guide releases group)."""
+        self._target_exit = exit_pos
+        self._waypoints = bfs_path(env, self.pos, np.array(exit_pos))
+        self.state = MOVING_TO_EXIT
+        self.assigned_guide = None
 
     # ================================================================
     # MOVEMENT RULES
@@ -282,6 +302,52 @@ class Civilian:
         else:
             self._pick_random_cardinal()
             self.vel = self._walk_dir * speed
+
+    def _boids_follow_guide(self, guide, all_civilians, speed, env):
+        """Boids steering for following a sweeper guide.
+        Cohesion: steer toward guide.
+        Alignment: match guide's direction.
+        Separation: avoid overlapping group members."""
+
+        # Cohesion: toward guide
+        diff = guide.pos - self.pos
+        dist = np.linalg.norm(diff)
+        cohesion = diff / dist if dist > 0 else np.zeros(2)
+
+        # Alignment: match guide velocity
+        gv = np.linalg.norm(guide.vel)
+        alignment = guide.vel / gv if gv > 0 else np.zeros(2)
+
+        # Separation: push away from nearby group members
+        separation = np.zeros(2)
+        sep_r = env.cell_size * 1.5
+        count = 0
+        for other in all_civilians:
+            if other is self or other.state != FOLLOWING_GUIDE:
+                continue
+            if other.assigned_guide is not guide:
+                continue
+            d = self.pos - other.pos
+            dn = np.linalg.norm(d)
+            if 0 < dn < sep_r:
+                separation += (d / dn) * (1.0 - dn / sep_r)
+                count += 1
+        if count > 0:
+            separation /= count
+
+        # Weighted sum
+        steer = cohesion * 1.0 + alignment * 0.5 + separation * 1.5
+        norm = np.linalg.norm(steer)
+        if norm > 0:
+            steer = (steer / norm) * speed
+        else:
+            steer = cohesion * speed
+
+        # Too far from guide? Rush toward them
+        if dist > env.cell_size * 5:
+            steer = cohesion * speed * 1.3
+
+        return steer
 
     def _move(self, env, speed):
         """Apply velocity with wall collision."""
