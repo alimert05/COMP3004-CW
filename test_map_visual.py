@@ -15,6 +15,7 @@ from evacsim.civilian import (
     FOLLOWING,
     FOLLOWING_GUIDE,
     MOVING_TO_EXIT,
+    QUEUED,
     ESCAPED,
     DEAD,
 )
@@ -177,6 +178,30 @@ while running:
         for civ in civilians:
             civ.update(env, smoke_system, fire_system, civilians)
 
+        # Exit queue processing — max 2 civilians per exit per tick
+        import numpy as np
+        EXIT_THROUGHPUT = 2
+        exit_queues = {}
+        for i, civ in enumerate(civilians):
+            if civ.state != QUEUED:
+                continue
+            if civ._target_exit is None:
+                civ.state = ESCAPED
+                continue
+            best_exit, best_d = None, float("inf")
+            for ex, ey in env.exits:
+                d = np.hypot(civ.pos[0] - ex, civ.pos[1] - ey)
+                if d < best_d:
+                    best_d = d
+                    best_exit = (ex, ey)
+            if best_exit:
+                exit_queues.setdefault(best_exit, []).append((best_d, i))
+        for q in exit_queues.values():
+            q.sort(key=lambda x: x[0])
+            for rank, (_, idx) in enumerate(q):
+                if rank < EXIT_THROUGHPUT:
+                    civilians[idx].state = ESCAPED
+
     # Draw map
     screen.blit(map_surface, (0, 0))
 
@@ -210,6 +235,8 @@ while running:
         sy = int(civ.pos[1] * SCALE)
         if civ.state == DEAD:
             colour = (200, 30, 30)    # red — dead
+        elif civ.state == QUEUED:
+            colour = (255, 255, 255)  # white — waiting in exit queue
         elif civ.state == MOVING_TO_EXIT:
             colour = (50, 220, 50)    # green — heading to exit
         elif civ.state == FLEEING_ROOM:
@@ -294,7 +321,8 @@ while running:
     alive_civs = [c for c in civilians if c.state not in (ESCAPED, DEAD)]
     avg_potency = sum(c.potency for c in alive_civs) / max(1, len(alive_civs))
     in_group = sum(1 for c in civilians if c.state == FOLLOWING_GUIDE)
-    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Follow:{following}  Group:{in_group}  Exit:{to_exit}  Escaped:{escaped}  Dead:{dead}  HP:{avg_potency:.0f}"
+    queued = sum(1 for c in civilians if c.state == QUEUED)
+    hud_text = f"T:{tick}  {sim_speed}x  Policy:{policy_label}  Guides:{guides_alive}  Idle:{idle}  Flee:{fleeing}  Wander:{wandering}  Follow:{following}  Group:{in_group}  Exit:{to_exit}  Queue:{queued}  Escaped:{escaped}  Dead:{dead}  HP:{avg_potency:.0f}"
     label = font.render(hud_text, True, (255, 255, 255))
     bg = pygame.Surface(
         (label.get_width() + 10, label.get_height() + 4), pygame.SRCALPHA

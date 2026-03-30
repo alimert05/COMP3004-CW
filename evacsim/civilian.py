@@ -34,8 +34,9 @@ WALL_FOLLOWING = 4  # Blind in smoke, hand-on-wall
 FOLLOWING = 5       # Herding — biased toward crowd direction
 FOLLOWING_GUIDE = 6 # In sweeper's group, using boids to follow
 MOVING_TO_EXIT = 7  # Following BFS path to exit
-ESCAPED = 8
-DEAD = 9
+QUEUED = 8          # At exit, waiting in line to escape
+ESCAPED = 9
+DEAD = 10
 
 
 class Civilian:
@@ -149,9 +150,16 @@ class Civilian:
             if self._target_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._target_exit))
                 if dist < env.cell_size:
-                    self.state = ESCAPED
+                    # Don't escape instantly — enter queue
+                    self.state = QUEUED
+                    self.vel = np.zeros(2)
                     return
             self._do_follow_path(env, speed, fallback=WANDERING)
+
+        elif self.state == QUEUED:
+            # Waiting at exit — simulation engine will process the queue
+            # Still take potency damage while waiting!
+            self.vel = np.zeros(2)
 
         elif self.state == FOLLOWING:
             # Rule 4: walk in crowd direction
