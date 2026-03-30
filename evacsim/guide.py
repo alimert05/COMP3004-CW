@@ -521,6 +521,7 @@ class SweeperGuide(Guide):
 
     COLLECTING = "collecting"
     ESCORTING = "escorting"
+    RELEASING = "releasing"   # Waiting at exit for group to arrive and escape
     RETURNING = "returning"
 
     def __init__(self, x: float, y: float, speed: float,
@@ -547,6 +548,10 @@ class SweeperGuide(Guide):
         # Target exit for escorting
         self._escort_exit = None
 
+        # Releasing: wait at exit for stragglers
+        self._release_wait = 0
+        self._release_max_wait = 60  # Max 60 ticks (2 seconds) at exit
+
         # Start patrol
         if self._patrol_route:
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
@@ -571,6 +576,8 @@ class SweeperGuide(Guide):
             self._do_collecting(env, smoke, civilians)
         elif self._phase == self.ESCORTING:
             self._do_escorting(env, smoke, civilians)
+        elif self._phase == self.RELEASING:
+            self._do_releasing(env)
         elif self._phase == self.RETURNING:
             self._do_returning(env, smoke, civilians)
 
@@ -608,13 +615,50 @@ class SweeperGuide(Guide):
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
                 if dist < env.cell_size * 2:
-                    self._release_group_at_exit(env)
-                    self._phase = self.RETURNING
-                    self._advance_patrol(env)
+                    # Arrived at exit — start RELEASING (wait for group)
+                    self._phase = self.RELEASING
+                    self._release_wait = 0
+                    self.vel = np.zeros(2)
                     return
             self.vel = np.zeros(2)
         else:
             self._follow_path(env)
+
+    def _do_releasing(self, env):
+        """Stand at exit, release group members as they arrive.
+        Like a firefighter holding the door open, counting heads."""
+        import numpy as np
+        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
+
+        self.vel = np.zeros(2)  # Stand still at exit
+        self._release_wait += 1
+
+        # Each tick: release any group member close enough to the exit
+        still_in_group = []
+        for civ in self._group:
+            if civ.state != FOLLOWING_GUIDE:
+                continue
+            dist_to_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
+            dist_to_guide = np.linalg.norm(civ.pos - self.pos)
+            if dist_to_exit < env.cell_size * 5 or dist_to_guide < env.cell_size * 3:
+                # Close enough — give them the exit
+                civ._set_exit_target_force(env, self._escort_exit)
+            else:
+                still_in_group.append(civ)
+
+        self._group = still_in_group
+
+        # Done waiting? (all released OR timeout)
+        if not self._group or self._release_wait >= self._release_max_wait:
+            # Drop any remaining stragglers back to wandering
+            for civ in self._group:
+                if civ.state == FOLLOWING_GUIDE:
+                    civ.assigned_guide = None
+                    civ.state = WANDERING
+            self._group.clear()
+            # Go back for more
+            self._phase = self.RETURNING
+            self._advance_patrol(env)
 
     def _do_returning(self, env, smoke, civilians):
         """Go back for more civilians."""
@@ -699,37 +743,8 @@ class SweeperGuide(Guide):
             fg = getattr(self, '_fire_grid', None)
             self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=fg)
 
-    def _release_group_at_exit(self, env):
-        """Release group at exit. Civilians near the guide OR near the exit
-        get the exit target. Civilians far from both go back to wandering.
-
-        The guide physically led them here — if they kept up with the guide,
-        they deserve to know where the exit is."""
-        import numpy as np
-        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
-
-        near = []
-        far = []
-
-        for civ in self._group:
-            if civ.state != FOLLOWING_GUIDE:
-                continue
-            dist_to_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
-            dist_to_guide = np.linalg.norm(civ.pos - self.pos)
-            # Near enough: within 8 cells of exit OR within 5 cells of guide
-            if dist_to_exit < env.cell_size * 8 or dist_to_guide < env.cell_size * 5:
-                near.append(civ)
-            else:
-                far.append(civ)
-
-        for civ in near:
-            civ._set_exit_target_force(env, self._escort_exit)
-
-        for civ in far:
-            civ.assigned_guide = None
-            civ.state = WANDERING
-
-        self._group.clear()
+    # _release_group_at_exit removed — replaced by _do_releasing phase
+    # Guide now waits at exit and releases civilians one by one as they arrive
 
     def _release_group_no_exit(self):
         """Release group without exit info (guide died/evacuating)."""
