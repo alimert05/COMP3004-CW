@@ -223,7 +223,7 @@ class Civilian:
                 self._do_random_walk(env, speed, local_smoke)
 
         # ── Apply movement ──
-        self._move(env, speed)
+        self._move(env, speed, all_civilians)
 
     # ================================================================
     # STATE TRANSITIONS
@@ -402,9 +402,35 @@ class Civilian:
 
         return steer
 
-    def _move(self, env, speed):
-        """Apply velocity with wall collision."""
+    def _move(self, env, speed, all_civilians=None):
+        """Apply velocity with wall collision + universal separation.
+
+        Universal separation (Reynolds 1987) applies to ALL civilians
+        regardless of state. Prevents overlapping, creates natural
+        queueing at exits and doorways."""
         x, y = self.pos
+
+        # ── Universal separation: push away from nearby civilians ──
+        # Quick distance check first (manhattan) to skip far civilians early
+        if all_civilians is not None:
+            sep_force = np.zeros(2)
+            sep_r = env.cell_size * 2.0  # 2 cells radius
+            px, py = self.pos[0], self.pos[1]
+            for other in all_civilians:
+                if other is self or other.state in (ESCAPED, DEAD):
+                    continue
+                # Fast manhattan pre-filter (avoids sqrt for distant civilians)
+                dx = px - other.pos[0]
+                dy = py - other.pos[1]
+                if abs(dx) > sep_r or abs(dy) > sep_r:
+                    continue
+                dn = np.sqrt(dx * dx + dy * dy)
+                if 0 < dn < sep_r:
+                    strength = (1.0 - dn / sep_r) ** 2
+                    sep_force[0] += (dx / dn) * strength
+                    sep_force[1] += (dy / dn) * strength
+            self.vel = self.vel + sep_force * speed * 0.4
+
         vx, vy = self.vel
 
         if env.is_walkable(x + vx, y + vy):
@@ -414,7 +440,6 @@ class Civilian:
         elif env.is_walkable(x, y + vy):
             self.pos = np.array([x, y + vy])
         else:
-            # Blocked — pick new direction
             self._pick_random_cardinal()
 
         # Stuck detection
