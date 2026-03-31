@@ -6,7 +6,7 @@ class SimConfig:
     # Map
     map_file: str = "maps/bottleneck_A.txt"
     cell_size: float = 10.0
-    fire_position: str = "center"
+    fire_position: str = "top_left"
 
     # Civilians
     n_civilians: int = 50
@@ -32,6 +32,6 @@ class SimConfig:
 # --- Visual mode settings (used by test_map_visual.py only) ---
 
 CIVILIAN_NUMBER = 100
-GUIDE_POLICY = "sweeper"
+GUIDE_POLICY = "router"
 GUIDES_ENABLED = True
 GUIDE_COUNT = None

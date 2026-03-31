@@ -137,8 +137,9 @@ class Guide:
         if not self.alive:
             return
 
-        # Store fire grid for fire-aware BFS
+        # Store grids for danger-aware BFS
         self._fire_grid = fire.density
+        self._smoke_grid = smoke.density
 
         # Check fire damage (guides resist smoke but not fire)
         local_fire = fire.get_density_at(self.pos[0], self.pos[1])
@@ -224,17 +225,47 @@ class Guide:
         return max(30.0, self.broadcast_radius * (1.0 - local_smoke * 0.5))
 
     def _follow_path(self, env: Environment) -> None:
-        """Follow the pre-computed waypoint path."""
+        """Follow the pre-computed waypoint path.
+        Checks ahead for fire AND heavy smoke — reroutes if dangerous.
+        Guides resist smoke but their civilian group does not."""
         if not self._waypoints:
             self.vel = np.array([0.0, 0.0])
             return
 
+        # Check next 10 waypoints for fire or heavy smoke
+        fg = getattr(self, '_fire_grid', None)
+        sg = getattr(self, '_smoke_grid', None)
+        if fg is not None or sg is not None:
+            needs_reroute = False
+            for wp in self._waypoints[:10]:
+                wr, wc = env.world_to_grid(wp[0], wp[1])
+                # Fire check
+                if fg is not None and 0 <= wr < fg.shape[0] and 0 <= wc < fg.shape[1]:
+                    if fg[wr, wc] > 0.2:
+                        needs_reroute = True
+                        break
+                # Heavy smoke check (dangerous for civilians in group)
+                if sg is not None and 0 <= wr < sg.shape[0] and 0 <= wc < sg.shape[1]:
+                    if sg[wr, wc] > 0.6:
+                        needs_reroute = True
+                        break
+            if needs_reroute:
+                # Combine fire + smoke into danger grid for BFS avoidance
+                danger = fg if fg is not None else np.zeros_like(env.grid, dtype=float)
+                if sg is not None:
+                    danger = np.maximum(danger, sg * 0.5)  # Smoke counts as half-fire
+                final = self._waypoints[-1]
+                self._waypoints = bfs_path(env, self.pos, final, fire_grid=danger)
+                if not self._waypoints:
+                    self.vel = np.array([0.0, 0.0])
+                    return
+
         target = self._waypoints[0]
+
         diff = target - self.pos
         dist = np.linalg.norm(diff)
 
         if dist < self.env.cell_size * 0.5:
-            # Reached this waypoint, move to next
             self._waypoints.pop(0)
             if not self._waypoints:
                 self.vel = np.array([0.0, 0.0])
@@ -730,17 +761,32 @@ class SweeperGuide(Guide):
         return count
 
     def _start_escort(self, env):
-        """Begin leading group to nearest exit."""
+        """Begin leading group to nearest SAFE exit.
+        Avoids exits that are in or near fire."""
         self._phase = self.ESCORTING
-        best_exit, best_d = None, float("inf")
+        fg = getattr(self, '_fire_grid', None)
+
+        best_exit, best_score = None, float("inf")
         for ex, ey in self.known_exits:
-            d = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-            if d < best_d:
-                best_d = d
+            dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+            # Penalize exits near fire or heavy smoke
+            danger_penalty = 0.0
+            if fg is not None:
+                er, ec = env.world_to_grid(ex, ey)
+                if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
+                    danger_penalty += fg[er, ec] * 500.0
+            sg = getattr(self, '_smoke_grid', None)
+            if sg is not None:
+                er, ec = env.world_to_grid(ex, ey)
+                if 0 <= er < sg.shape[0] and 0 <= ec < sg.shape[1]:
+                    danger_penalty += sg[er, ec] * 200.0
+            score = dist + danger_penalty
+            if score < best_score:
+                best_score = score
                 best_exit = (ex, ey)
+
         self._escort_exit = best_exit
         if best_exit:
-            fg = getattr(self, '_fire_grid', None)
             self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=fg)
 
     # _release_group_at_exit removed — replaced by _do_releasing phase
