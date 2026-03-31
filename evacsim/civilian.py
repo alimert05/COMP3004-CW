@@ -170,8 +170,13 @@ class Civilian:
             # Rule 4: walk in crowd direction
             if self._walk_dir is not None:
                 self.vel = self._walk_dir * speed
-            # Re-check crowd each tick
-            if eff_vision > 0:
+
+            # Stuck while following crowd? Give up and wander
+            if self._stuck_ticks >= 8:
+                self.state = WANDERING
+                self._walk_dir = None
+            elif eff_vision > 0:
+                # Re-check crowd each tick
                 crowd_dir = self._sense_crowd_direction(all_civilians, eff_vision * 3)
                 if crowd_dir is not None:
                     self._walk_dir = crowd_dir
