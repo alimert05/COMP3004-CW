@@ -482,10 +482,17 @@ class Civilian:
 
     def _calc_speed(self, in_fire, in_smoke):
         has_path = self.state in (FLEEING_ROOM, MOVING_TO_EXIT, FOLLOWING)
+        following_guide = self.state == FOLLOWING_GUIDE
         if in_fire:
             return self.speed * 1.8
         elif in_smoke:
-            return self.speed * (0.7 if has_path else 0.3)
+            if following_guide:
+                # Guide is leading — motivated, move at 85% speed even in smoke
+                return self.speed * 0.85
+            elif has_path:
+                return self.speed * 0.7
+            else:
+                return self.speed * 0.3
         return self.speed
 
     def _see_others_fleeing(self, all_civilians):

@@ -334,30 +334,37 @@ class Guide:
             self.vel = np.array([0.0, 0.0])
             return
 
-        # Check next 10 waypoints for fire or heavy smoke
+        # Check next 10 waypoints for fire or smoke
         fg = getattr(self, '_fire_grid', None)
         sg = getattr(self, '_smoke_grid', None)
+        # Lower smoke threshold when carrying civilians (they're vulnerable)
+        has_group = hasattr(self, '_group') and len(self._group) > 0
+        smoke_threshold = 0.3 if has_group else 0.6
+
         if fg is not None or sg is not None:
             needs_reroute = False
             for wp in self._waypoints[:10]:
                 wr, wc = env.world_to_grid(wp[0], wp[1])
-                # Fire check
                 if fg is not None and 0 <= wr < fg.shape[0] and 0 <= wc < fg.shape[1]:
                     if fg[wr, wc] > 0.2:
                         needs_reroute = True
                         break
-                # Heavy smoke check (dangerous for civilians in group)
                 if sg is not None and 0 <= wr < sg.shape[0] and 0 <= wc < sg.shape[1]:
-                    if sg[wr, wc] > 0.6:
+                    if sg[wr, wc] > smoke_threshold:
                         needs_reroute = True
                         break
             if needs_reroute:
                 # Combine fire + smoke into danger grid for BFS avoidance
+                # When carrying a group: smoke is MORE dangerous (civilians vulnerable)
                 danger = fg if fg is not None else np.zeros_like(env.grid, dtype=float)
                 if sg is not None:
-                    danger = np.maximum(danger, sg * 0.5)  # Smoke counts as half-fire
+                    smoke_weight = 1.0 if has_group else 0.5
+                    danger = np.maximum(danger, sg * smoke_weight)
                 final = self._waypoints[-1]
                 self._waypoints = bfs_path(env, self.pos, final, fire_grid=danger)
+                if not self._waypoints:
+                    # No safe path — try without smoke avoidance as fallback
+                    self._waypoints = bfs_path(env, self.pos, final, fire_grid=fg)
                 if not self._waypoints:
                     self.vel = np.array([0.0, 0.0])
                     return
@@ -889,7 +896,17 @@ class SweeperGuide(Guide):
 
         self._escort_exit = best_exit
         if best_exit:
-            self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=fg)
+            # When escorting a group, avoid smoke too (civilians are vulnerable)
+            sg = getattr(self, '_smoke_grid', None)
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 0.5)  # Smoke counts as half-fire
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 0.5
+            else:
+                danger = None
+            self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=danger)
 
     # _release_group_at_exit removed — replaced by _do_releasing phase
     # Guide now waits at exit and releases civilians one by one as they arrive
@@ -909,12 +926,26 @@ class SweeperGuide(Guide):
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
     def _advance_patrol(self, env):
-        """Move to next patrol point."""
+        """Move to next patrol point. If carrying a group, avoid smoke too."""
         if not self._patrol_route:
             return
         self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
         fg = getattr(self, '_fire_grid', None)
-        self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg)
+        # When carrying a group, combine fire+smoke into danger grid
+        if self._group:
+            sg = getattr(self, '_smoke_grid', None)
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 0.5)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 0.5
+            else:
+                danger = None
+            self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger)
+        else:
+            # No group — just avoid fire (guide has gas mask for smoke)
+            self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg)
 
 
 def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
