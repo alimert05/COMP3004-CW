@@ -1189,23 +1189,27 @@ class RouterGuide(Guide):
                 self._recruit_nearby(env, smoke, civilians)
 
     def _do_collecting(self, env, smoke, civilians):
-        """At hotspot: recruit stuck civilians into group."""
+        """At hotspot: recruit civilians into group. Soft limit — collect
+        as many as possible, but start escorting once we have enough or timeout."""
         self.vel = np.zeros(2)
         self._collect_wait += 1
         self._recruit_nearby(env, smoke, civilians)
 
-        if len(self._group) >= self._max_group or self._collect_wait >= self._max_collect_wait:
+        # Start escorting when: enough people OR timeout OR no more nearby
+        has_enough = len(self._group) >= self._max_group
+        timed_out = self._collect_wait >= self._max_collect_wait
+        if has_enough or timed_out:
             if self._group:
                 self._start_escort(env, smoke, civilians)
             else:
-                # Nobody to collect → return home
                 self._phase = self.RETURNING
                 fg = getattr(self, '_fire_grid', None)
                 self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=fg)
 
     def _do_escorting(self, env, smoke, civilians):
-        """Lead group to optimal exit using congestion-aware path."""
-        self._recruit_nearby(env, smoke, civilians)  # Pick up stragglers
+        """Lead group to optimal exit. KEY: always pick up civilians on the
+        way — no group limit while escorting. Maximize survivors per trip."""
+        self._recruit_nearby_unlimited(env, smoke, civilians)
         if not self._waypoints:
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
@@ -1262,22 +1266,21 @@ class RouterGuide(Guide):
     # ── Intelligence methods ──
 
     def _find_hotspot(self, env, smoke, civilians):
-        """Find congestion hotspot in territory.
-        A hotspot = cluster of 2+ civilians in same area in clean air.
-        Uses density (civilian count per region), not just stuck detection."""
+        """Find the area with MOST un-helped civilians in territory.
+        Router's intelligence: go where you can help the MOST people.
+        Sweeper follows a fixed route. Router goes where the need is greatest."""
         from evacsim.civilian import ESCAPED, DEAD, IDLE, REACTING
         rows, cols = env.grid.shape
         min_r, max_r, min_c, max_c = self._territory
         fg = getattr(self, '_fire_grid', None)
         sg = getattr(self, '_smoke_grid', None)
-        region = 4  # Smaller regions = more precise detection
-        best_pos, best_n = None, 1  # Lower threshold: 2+ civilians
+        region = 5
+        best_pos, best_n = None, 1  # Need 2+ civilians
 
         for rr in range(min_r, min(max_r, rows), region):
             for rc in range(min_c, min(max_c, cols), region):
                 cr = min(rr + region//2, rows-1)
                 cc = min(rc + region//2, cols-1)
-                # Skip dangerous areas
                 if fg is not None and fg[cr, cc] > 0.2:
                     continue
                 if sg is not None and sg[cr, cc] > 0.5:
@@ -1286,7 +1289,6 @@ class RouterGuide(Guide):
                 for civ in civilians:
                     if civ.state in (ESCAPED, DEAD, IDLE, REACTING):
                         continue
-                    # Skip civilians already in a guide's group
                     if civ.assigned_guide is not None:
                         continue
                     r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
@@ -1334,6 +1336,32 @@ class RouterGuide(Guide):
                     self._group.append(civ)
                     civ.assigned_guide = self
                     from evacsim.civilian import FOLLOWING_GUIDE
+                    civ.state = FOLLOWING_GUIDE
+
+    def _recruit_nearby_unlimited(self, env, smoke, civilians):
+        """Recruit ANY nearby civilian while escorting — no group limit.
+        If you're walking to the exit and pass civilians, pick them up.
+        This maximizes survivors per trip (Router's key intelligence)."""
+        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        for civ in civilians:
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius:
+                if civ.state == IDLE:
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                elif civ.state == REACTING:
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    continue
+                else:
+                    self._group.append(civ)
+                    civ.assigned_guide = self
                     civ.state = FOLLOWING_GUIDE
 
     def _start_escort(self, env, smoke, civilians):
