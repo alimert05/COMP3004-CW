@@ -45,10 +45,8 @@ class Simulation:
             speed=config.civilian_speed, seed=config.seed + 100
         )
 
-        # Spawn guides
-        n_guides = config.n_guides
-        if n_guides is None:
-            n_guides = len(self.env.exits)
+        # Spawn guides (fixed count for fair comparison)
+        n_guides = config.n_guides if config.n_guides is not None else 4
 
         self.guides = []
         if config.guide_policy == "beacon":

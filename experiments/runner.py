@@ -34,6 +34,9 @@ MAPS = [
     "maps/bottleneck_A.txt",
     "maps/bottleneck_B.txt",
     "maps/bottleneck_C.txt",
+    "maps/open_plan_A.txt",
+    "maps/open_plan_B.txt",
+    "maps/open_plan_C.txt",
 ]
 
 FIRE_POSITIONS = [

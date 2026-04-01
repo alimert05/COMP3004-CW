@@ -6,7 +6,7 @@ class SimConfig:
     # Map
     map_file: str = "maps/bottleneck_A.txt"
     cell_size: float = 10.0
-    fire_position: str = "top_left"
+    fire_position: str = "center"
 
     # Civilians
     n_civilians: int = 50
@@ -14,7 +14,7 @@ class SimConfig:
 
     # Guides
     guide_policy: str = "beacon"  # "none", "beacon", "sweeper", "router"
-    n_guides: int = None  # None = 1 per exit
+    n_guides: int = 4  # Fixed at 4 for fair comparison across maps
     guide_speed: float = 2.0
 
     # Smoke/Fire

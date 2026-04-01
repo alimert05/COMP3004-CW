@@ -84,6 +84,108 @@ def bfs_path(env: Environment, start_world, goal_world, fire_grid=None):
         return result if result is not None else []
 
 
+def dijkstra_congestion_path(env, start_world, goal_world,
+                             fire_grid=None, smoke_grid=None,
+                             civilian_density=None):
+    """Congestion-aware pathfinding using Dijkstra's algorithm.
+    Inspired by Zhang et al. (2020) IEEE ICRA.
+
+    Cost of traversing a cell = base_cost + fire_penalty + smoke_penalty + density_penalty
+
+    This finds paths that AVOID congested areas, smoky corridors, and fire —
+    not just the shortest geometric path. A longer path through empty corridors
+    is preferred over a shorter path through a jammed doorway.
+
+    civilian_density: 2D numpy array counting civilians per cell.
+    """
+    import heapq
+
+    sr, sc = env.world_to_grid(start_world[0], start_world[1])
+    gr, gc = env.world_to_grid(goal_world[0], goal_world[1])
+    rows, cols = env.grid.shape
+
+    if sr == gr and sc == gc:
+        return []
+
+    # Cost grid: infinity everywhere
+    cost = np.full((rows, cols), float('inf'))
+    cost[sr, sc] = 0.0
+    parent = {}
+    parent[(sr, sc)] = None
+
+    # Priority queue: (cost, row, col)
+    pq = [(0.0, sr, sc)]
+
+    while pq:
+        c, r, cc = heapq.heappop(pq)
+
+        if r == gr and cc == gc:
+            # Reconstruct path
+            path = []
+            current = (r, cc)
+            while current is not None:
+                path.append(current)
+                current = parent[current]
+            path.reverse()
+            waypoints = []
+            for pr, pc in path[1:]:
+                wx, wy = env.grid_to_world(pr, pc)
+                waypoints.append(np.array([wx, wy], dtype=float))
+            return waypoints
+
+        if c > cost[r, cc]:
+            continue  # Stale entry
+
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = r + dr, cc + dc
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            if env.grid[nr, nc] == CellType.WALL:
+                continue
+
+            # Base movement cost
+            move_cost = 1.0
+
+            # Fire penalty (impassable if > 0.5, expensive if > 0.2)
+            if fire_grid is not None:
+                fire_val = fire_grid[nr, nc]
+                if fire_val > 0.5:
+                    continue  # Impassable
+                move_cost += fire_val * 20.0
+
+            # Smoke penalty
+            if smoke_grid is not None:
+                smoke_val = smoke_grid[nr, nc]
+                move_cost += smoke_val * 5.0
+
+            # Congestion penalty (Zhang et al. 2020 density map)
+            if civilian_density is not None:
+                density = civilian_density[nr, nc]
+                move_cost += density * 8.0  # Each civilian on cell adds 8 cost
+
+            new_cost = cost[r, cc] + move_cost
+            if new_cost < cost[nr, nc]:
+                cost[nr, nc] = new_cost
+                parent[(nr, nc)] = (r, cc)
+                heapq.heappush(pq, (new_cost, nr, nc))
+
+    return []  # No path found
+
+
+def build_density_grid(env, civilians):
+    """Build a 2D grid of civilian density per cell.
+    Used by Router for congestion-aware pathfinding (Zhang et al. 2020)."""
+    from evacsim.civilian import ESCAPED, DEAD
+    grid = np.zeros(env.grid.shape, dtype=float)
+    for civ in civilians:
+        if civ.state in (ESCAPED, DEAD):
+            continue
+        r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
+        if 0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]:
+            grid[r, c] += 1.0
+    return grid
+
+
 class Guide:
     """Base class for all guide types."""
 
@@ -931,206 +1033,369 @@ def _rank_junctions_by_centrality(junctions, exits, env):
 
 class RouterGuide(Guide):
     """
-    Congestion-Aware Router: positions at corridor JUNCTIONS and
-    directs traffic based on real-time exit congestion.
+    Congestion-Aware Router (inspired by Zhang et al. 2020, IEEE ICRA).
+
+    Uses congestion-aware Dijkstra pathfinding where path cost includes
+    civilian density, smoke, and fire. Routes civilians on the LEAST
+    CONGESTED PATH to the LEAST CONGESTED EXIT.
 
     Fundamentally different from other policies:
-      - Beacon: STATIC at exits
-      - Sweeper: MOBILE through rooms, collects groups
-      - Router: STRATEGIC at junctions, manages corridor FLOW
+      - Beacon: STATIC at exits, broadcasts one exit
+      - Sweeper: PATROLS rooms, collects groups, escorts to NEAREST exit
+      - Router: REACTS to congestion, collects stuck civilians,
+                escorts to OPTIMAL exit via LEAST CONGESTED path
 
     Behaviour:
-      1. Find all corridor junctions (3+ open directions)
-      2. Walk to most central junction (decision point with most traffic)
-      3. Stand there, broadcast per-civilian optimal exit
-      4. Every 30 ticks: re-evaluate — if congestion shifts, move to a
-         better junction closer to the congested area
-      5. Can REDIRECT civilians already heading to wrong exit
+      1. Go to territory center, scan for congestion hotspots
+      2. Hotspot found → go there, collect stuck civilians into group
+      3. Escort group to least congested exit using Dijkstra density path
+      4. Release at exit → return to territory center → scan again
 
-    Intelligence:
-      - Per-civilian exit scoring: distance + congestion_penalty + smoke_penalty
-      - Dynamic repositioning based on real-time flow data
-      - Smoke-aware: penalizes exits with heavy smoke on the path
+    Intelligence (Zhang et al. 2020):
+      - Population density map for congestion detection
+      - Dijkstra pathfinding with density-weighted costs
+      - Per-civilian optimal exit selection
+      - Can REDIRECT civilians already heading to congested exit
     """
 
-    def __init__(self, x: float, y: float, speed: float,
-                 env: Environment, rng: np.random.Generator,
-                 assigned_junctions: list = None):
+    SCANNING = "scanning"
+    RESPONDING = "responding"
+    COLLECTING = "collecting"
+    ESCORTING = "escorting"
+    RELEASING = "releasing"
+    RETURNING = "returning"
+
+    def __init__(self, x, y, speed, env, rng, territory_bounds=None):
         super().__init__(x, y, speed, env, rng)
 
-        # Get junctions for this guide
-        if assigned_junctions:
-            self._junctions = assigned_junctions
+        # Territory
+        if territory_bounds:
+            self._territory = territory_bounds
         else:
-            all_j = _find_junctions(env)
-            self._junctions = _rank_junctions_by_centrality(
-                all_j, env.exits, env)
+            self._territory = (0, env.grid.shape[0], 0, env.grid.shape[1])
 
-        # Current junction we're standing at
-        self._current_junction_idx = 0
+        self._home_pos = self._find_territory_center(env)
         self._waypoints = []
-        self._at_junction = False
+        self._phase = self.SCANNING
+
+        # Group management (like Sweeper but for congestion)
+        self._group = []
+        self._max_group = 6
 
         # Congestion data
         self._exit_counts = {}
-        self._eval_interval = 80  # Stay at junction long before reconsidering
+        self._density_grid = None
+        self._eval_interval = 20
         self._eval_counter = 0
 
-        # Walk to first (most central) junction
-        if self._junctions:
-            self._waypoints = bfs_path(env, self.pos, self._junctions[0])
+        # Escort target
+        self._escort_exit = None
+
+        # Releasing state
+        self._release_wait = 0
+        self._release_max_wait = 50
+
+        # Collecting wait
+        self._collect_wait = 0
+        self._max_collect_wait = 30
+
+        # Walk to territory center
+        self._waypoints = bfs_path(env, self.pos, self._home_pos)
+
+    def _find_territory_center(self, env):
+        min_r, max_r, min_c, max_c = self._territory
+        cr = max(0, min(env.grid.shape[0]-1, (min_r + max_r) // 2))
+        cc = max(0, min(env.grid.shape[1]-1, (min_c + max_c) // 2))
+        if env.grid[cr, cc] != CellType.WALL:
+            return np.array(env.grid_to_world(cr, cc), dtype=float)
+        visited = {(cr, cc)}
+        q = deque([(cr, cc)])
+        rows, cols = env.grid.shape
+        while q:
+            r, c = q.popleft()
+            if env.grid[r, c] != CellType.WALL:
+                return np.array(env.grid_to_world(r, c), dtype=float)
+            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nr, nc = r+dr, c+dc
+                if 0<=nr<rows and 0<=nc<cols and (nr,nc) not in visited:
+                    visited.add((nr,nc))
+                    q.append((nr,nc))
+        return np.array(env.grid_to_world(cr, cc), dtype=float)
 
     def update(self, env, smoke, fire, civilians):
         super().update(env, smoke, fire, civilians)
         if not self.alive:
+            self._release_group_wandering()
             return
         if self._do_self_evacuation(env):
+            self._release_group_wandering()
             return
 
-        # Periodic: update congestion + maybe reposition
+        # Update density + congestion data
         self._eval_counter += 1
         if self._eval_counter >= self._eval_interval:
             self._eval_counter = 0
-            self._update_congestion(civilians)
-            self._maybe_reposition(env, smoke, civilians)
+            self._density_grid = build_density_grid(env, civilians)
+            self._update_exit_counts(civilians)
 
-        # ALWAYS broadcast to nearby civilians — even while walking to junction
-        # This ensures we help every civilian we pass, not just at junctions
-        if self._eval_counter % 3 == 0:
-            self._broadcast_optimal_exits(env, smoke, civilians)
+        # Router does NOT broadcast — it physically escorts.
+        # This is the key difference from Beacon (which broadcasts).
 
-        # Movement — walk to junction, then STAY there
-        if not self._at_junction:
-            if not self._waypoints:
-                self._at_junction = True
-                self.vel = np.zeros(2)
-            else:
-                self._follow_path(env)
+        # Clean group
+        self._clean_group()
+
+        # Phase FSM
+        if self._phase == self.SCANNING:
+            self._do_scanning(env, smoke, civilians)
+        elif self._phase == self.RESPONDING:
+            self._do_responding(env, smoke, civilians)
+        elif self._phase == self.COLLECTING:
+            self._do_collecting(env, smoke, civilians)
+        elif self._phase == self.ESCORTING:
+            self._do_escorting(env, smoke, civilians)
+        elif self._phase == self.RELEASING:
+            self._do_releasing(env)
+        elif self._phase == self.RETURNING:
+            self._do_returning(env, smoke, civilians)
+
+    # ── Phase behaviors ──
+
+    def _do_scanning(self, env, smoke, civilians):
+        if self._waypoints:
+            self._follow_path(env)
+            # Recruit while walking to home
+            self._recruit_nearby(env, smoke, civilians)
+            return
+        self.vel = np.zeros(2)
+        # Scan every eval_interval ticks (not just on counter==0)
+        hotspot = self._find_hotspot(env, smoke, civilians)
+        if hotspot is not None:
+            fg = getattr(self, '_fire_grid', None)
+            self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=fg)
+            self._phase = self.RESPONDING
+        elif self._group:
+            # Picked up civilians while walking — escort them
+            self._start_escort(env, smoke, civilians)
+
+    def _do_responding(self, env, smoke=None, civilians=None):
+        if not self._waypoints:
+            self._phase = self.COLLECTING
+            self._collect_wait = 0
+            self.vel = np.zeros(2)
         else:
-            self.vel = np.zeros(2)  # Stand at junction
+            self._follow_path(env)
+            # Recruit while walking to hotspot
+            if smoke and civilians:
+                self._recruit_nearby(env, smoke, civilians)
 
-    def _update_congestion(self, civilians):
-        """Count civilians heading to each exit + queued at each exit."""
+    def _do_collecting(self, env, smoke, civilians):
+        """At hotspot: recruit stuck civilians into group."""
+        self.vel = np.zeros(2)
+        self._collect_wait += 1
+        self._recruit_nearby(env, smoke, civilians)
+
+        if len(self._group) >= self._max_group or self._collect_wait >= self._max_collect_wait:
+            if self._group:
+                self._start_escort(env, smoke, civilians)
+            else:
+                # Nobody to collect → return home
+                self._phase = self.RETURNING
+                fg = getattr(self, '_fire_grid', None)
+                self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=fg)
+
+    def _do_escorting(self, env, smoke, civilians):
+        """Lead group to optimal exit using congestion-aware path."""
+        self._recruit_nearby(env, smoke, civilians)  # Pick up stragglers
+        if not self._waypoints:
+            if self._escort_exit is not None:
+                dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
+                if dist < env.cell_size * 2:
+                    self._phase = self.RELEASING
+                    self._release_wait = 0
+                    self.vel = np.zeros(2)
+                    return
+            self.vel = np.zeros(2)
+        else:
+            self._follow_path(env)
+
+    def _do_releasing(self, env):
+        """Wait at exit for group to arrive and escape."""
+        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
+        self.vel = np.zeros(2)
+        self._release_wait += 1
+
+        still = []
+        for civ in self._group:
+            if civ.state != FOLLOWING_GUIDE:
+                continue
+            dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
+            dist_guide = np.linalg.norm(civ.pos - self.pos)
+            if dist_exit < self.env.cell_size * 5 or dist_guide < self.env.cell_size * 3:
+                civ._set_exit_target_force(self.env, self._escort_exit)
+            else:
+                still.append(civ)
+        self._group = still
+
+        if not self._group or self._release_wait >= self._release_max_wait:
+            for civ in self._group:
+                if civ.state == FOLLOWING_GUIDE:
+                    civ.assigned_guide = None
+                    civ.state = WANDERING
+            self._group.clear()
+            self._phase = self.RETURNING
+            fg = getattr(self, '_fire_grid', None)
+            self._waypoints = bfs_path(self.env, self.pos, self._home_pos, fire_grid=fg)
+
+    def _do_returning(self, env, smoke=None, civilians=None):
+        if not self._waypoints:
+            self._phase = self.SCANNING
+            self.vel = np.zeros(2)
+        else:
+            self._follow_path(env)
+            # Recruit while walking home
+            if smoke and civilians:
+                self._recruit_nearby(env, smoke, civilians)
+                if self._group:
+                    # Found civilians on the way — escort them
+                    self._start_escort(env, smoke, civilians)
+
+    # ── Intelligence methods ──
+
+    def _find_hotspot(self, env, smoke, civilians):
+        """Find congestion hotspot in territory.
+        A hotspot = cluster of 2+ civilians in same area in clean air.
+        Uses density (civilian count per region), not just stuck detection."""
+        from evacsim.civilian import ESCAPED, DEAD, IDLE, REACTING
+        rows, cols = env.grid.shape
+        min_r, max_r, min_c, max_c = self._territory
+        fg = getattr(self, '_fire_grid', None)
+        sg = getattr(self, '_smoke_grid', None)
+        region = 4  # Smaller regions = more precise detection
+        best_pos, best_n = None, 1  # Lower threshold: 2+ civilians
+
+        for rr in range(min_r, min(max_r, rows), region):
+            for rc in range(min_c, min(max_c, cols), region):
+                cr = min(rr + region//2, rows-1)
+                cc = min(rc + region//2, cols-1)
+                # Skip dangerous areas
+                if fg is not None and fg[cr, cc] > 0.2:
+                    continue
+                if sg is not None and sg[cr, cc] > 0.5:
+                    continue
+                n, sx, sy = 0, 0.0, 0.0
+                for civ in civilians:
+                    if civ.state in (ESCAPED, DEAD, IDLE, REACTING):
+                        continue
+                    # Skip civilians already in a guide's group
+                    if civ.assigned_guide is not None:
+                        continue
+                    r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
+                    if rr <= r < rr+region and rc <= c < rc+region:
+                        n += 1; sx += civ.pos[0]; sy += civ.pos[1]
+                if n > best_n:
+                    best_n = n
+                    best_pos = np.array([sx/n, sy/n])
+
+        if best_pos is not None:
+            gr, gc = env.world_to_grid(best_pos[0], best_pos[1])
+            if env.grid[gr, gc] == CellType.WALL:
+                for dr in range(-2, 3):
+                    for dc in range(-2, 3):
+                        nr, nc = gr+dr, gc+dc
+                        if 0<=nr<rows and 0<=nc<cols and env.grid[nr,nc]!=CellType.WALL:
+                            return np.array(env.grid_to_world(nr, nc), dtype=float)
+                return None
+        return best_pos
+
+    def _recruit_nearby(self, env, smoke, civilians):
+        """Recruit stuck nearby civilians into group."""
+        if len(self._group) >= self._max_group:
+            return
+        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        for civ in civilians:
+            if len(self._group) >= self._max_group:
+                break
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius:
+                if civ.state == IDLE:
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                elif civ.state == REACTING:
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    continue
+                else:
+                    self._group.append(civ)
+                    civ.assigned_guide = self
+                    from evacsim.civilian import FOLLOWING_GUIDE
+                    civ.state = FOLLOWING_GUIDE
+
+    def _start_escort(self, env, smoke, civilians):
+        """Find LEAST CONGESTED exit using density-aware scoring, then
+        use congestion-aware Dijkstra to plan the path."""
+        self._phase = self.ESCORTING
+        fg = getattr(self, '_fire_grid', None)
+        sg = getattr(self, '_smoke_grid', None)
+
+        # Score each exit: distance + congestion + smoke
+        best_exit, best_score = None, float("inf")
+        for ex, ey in self.known_exits:
+            dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+            congestion = self._exit_counts.get((ex, ey), 0) * 30.0
+            smoke_pen = smoke.get_density_at(ex, ey) * 200.0
+            fire_pen = 0
+            if fg is not None:
+                er, ec = env.world_to_grid(ex, ey)
+                if 0<=er<fg.shape[0] and 0<=ec<fg.shape[1]:
+                    fire_pen = fg[er, ec] * 500.0
+            score = dist + congestion + smoke_pen + fire_pen
+            if score < best_score:
+                best_score = score
+                best_exit = (ex, ey)
+
+        self._escort_exit = best_exit
+        if best_exit:
+            # Use congestion-aware Dijkstra (Zhang et al. 2020)
+            self._waypoints = dijkstra_congestion_path(
+                env, self.pos, np.array(best_exit),
+                fire_grid=fg, smoke_grid=sg,
+                civilian_density=self._density_grid)
+
+    def _update_exit_counts(self, civilians):
         from evacsim.civilian import MOVING_TO_EXIT, QUEUED
         self._exit_counts = {(ex, ey): 0 for ex, ey in self.known_exits}
         for civ in civilians:
             if civ.state not in (MOVING_TO_EXIT, QUEUED) or civ._target_exit is None:
                 continue
             tx, ty = civ._target_exit
-            best_exit, best_d = None, float("inf")
+            best, best_d = None, float("inf")
             for ex, ey in self.known_exits:
-                d = np.hypot(tx - ex, ty - ey)
+                d = np.hypot(tx-ex, ty-ey)
                 if d < best_d:
-                    best_d = d
-                    best_exit = (ex, ey)
-            if best_exit and best_d < 20:
-                self._exit_counts[best_exit] += 1
+                    best_d = d; best = (ex, ey)
+            if best and best_d < 20:
+                self._exit_counts[best] += 1
 
-    def _maybe_reposition(self, env, smoke, civilians):
-        """Check if we should move to a different junction.
-
-        Move if:
-          - Current junction is in heavy smoke
-          - A different junction is closer to the congestion hotspot
-          - A different junction has more un-helped civilians nearby
-        """
-        if not self._junctions or len(self._junctions) < 2:
-            return
-
-        # Score each junction
-        best_idx = self._current_junction_idx
-        best_score = float("inf")
-
-        # Find the most congested exit
-        if self._exit_counts:
-            most_congested = max(self._exit_counts, key=self._exit_counts.get)
-            max_congestion = self._exit_counts[most_congested]
-        else:
-            most_congested = None
-            max_congestion = 0
-
-        from evacsim.civilian import ESCAPED, DEAD, IDLE, MOVING_TO_EXIT, QUEUED
-
-        for i, junc in enumerate(self._junctions):
-            # Penalty for smoke at junction
-            smoke_at = smoke.get_density_at(junc[0], junc[1])
-            smoke_penalty = smoke_at * 200
-
-            # Bonus for being near congested exit (to intercept traffic)
-            congestion_bonus = 0
-            if most_congested and max_congestion > 3:
-                dist_to_congested = np.hypot(
-                    junc[0] - most_congested[0], junc[1] - most_congested[1])
-                congestion_bonus = -dist_to_congested * 0.5  # Negative = good
-
-            # Bonus for un-helped civilians nearby
-            nearby_unhelpful = 0
-            for civ in civilians:
-                if civ.state in (ESCAPED, DEAD, IDLE, MOVING_TO_EXIT, QUEUED):
-                    continue
-                d = np.linalg.norm(civ.pos - junc)
-                if d < self.broadcast_radius:
-                    nearby_unhelpful += 1
-            civilian_bonus = -nearby_unhelpful * 50  # More civilians = better
-
-            score = smoke_penalty + congestion_bonus + civilian_bonus
-
-            if score < best_score:
-                best_score = score
-                best_idx = i
-
-        # Reposition if a significantly better junction exists
-        if best_idx != self._current_junction_idx:
-            self._current_junction_idx = best_idx
-            self._waypoints = bfs_path(
-                env, self.pos, self._junctions[best_idx])
-            self._at_junction = False
-
-    def _best_exit_for(self, civ_pos, smoke):
-        """Find optimal exit for a civilian. Considers:
-        1. BFS distance from civilian to exit
-        2. Congestion at exit (how many already heading there)
-        3. Smoke on the path (penalize smoky exits)"""
-        best_exit, best_score = None, float("inf")
-
-        for ex, ey in self.known_exits:
-            # Distance
-            dist = np.hypot(civ_pos[0] - ex, civ_pos[1] - ey)
-
-            # Congestion penalty
-            congestion = self._exit_counts.get((ex, ey), 0)
-            congestion_penalty = congestion * 30.0
-
-            # Smoke penalty: sample smoke at exit location
-            smoke_at_exit = smoke.get_density_at(ex, ey)
-            smoke_penalty = smoke_at_exit * 100.0
-
-            score = dist + congestion_penalty + smoke_penalty
-
-            if score < best_score:
-                best_score = score
-                best_exit = (ex, ey)
-
-        return best_exit
-
-    def _broadcast_optimal_exits(self, env, smoke, civilians):
-        """Tell each nearby civilian their personal optimal exit."""
+    def _broadcast_redirect(self, env, smoke, civilians):
+        """Broadcast optimal exit. Redirect civilians heading to congested exit."""
         radius = self.get_broadcast_radius(smoke)
-
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE, QUEUED)
-
         for civ in civilians:
             if civ.state in (ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
             dist = np.linalg.norm(civ.pos - self.pos)
             if dist >= radius:
                 continue
-
             optimal = self._best_exit_for(civ.pos, smoke)
             if optimal is None:
                 continue
-
             if civ.state == IDLE:
                 civ.state = REACTING
                 civ._reaction_counter = 0
@@ -1140,55 +1405,59 @@ class RouterGuide(Guide):
                 civ._reaction_delay = min(civ._reaction_delay, 5)
                 civ._guide_told_exit = optimal
             elif civ.state in (MOVING_TO_EXIT, QUEUED):
-                # Redirect only if new exit is 20%+ better
                 if civ._target_exit is not None:
                     cur = civ._target_exit
-                    cur_s = (np.hypot(civ.pos[0] - cur[0], civ.pos[1] - cur[1])
-                             + self._exit_counts.get((cur[0], cur[1]), 0) * 30.0)
-                    opt_s = (np.hypot(civ.pos[0] - optimal[0], civ.pos[1] - optimal[1])
-                             + self._exit_counts.get(optimal, 0) * 30.0)
-                    if opt_s < cur_s * 0.8:
+                    cur_s = np.hypot(civ.pos[0]-cur[0], civ.pos[1]-cur[1]) + self._exit_counts.get((cur[0],cur[1]),0)*30
+                    opt_s = np.hypot(civ.pos[0]-optimal[0], civ.pos[1]-optimal[1]) + self._exit_counts.get(optimal,0)*30
+                    if opt_s < cur_s * 0.75:
                         civ._set_exit_target_force(env, optimal)
             else:
                 civ._set_exit_target(env, optimal)
 
+    def _best_exit_for(self, civ_pos, smoke):
+        best, best_s = None, float("inf")
+        for ex, ey in self.known_exits:
+            s = np.hypot(civ_pos[0]-ex, civ_pos[1]-ey) + self._exit_counts.get((ex,ey),0)*30 + smoke.get_density_at(ex,ey)*100
+            if s < best_s:
+                best_s = s; best = (ex, ey)
+        return best
+
+    def _release_group_wandering(self):
+        from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
+        for civ in self._group:
+            if civ.state == FOLLOWING_GUIDE:
+                civ.assigned_guide = None
+                civ.state = WANDERING
+        self._group.clear()
+
+    def _clean_group(self):
+        from evacsim.civilian import ESCAPED, DEAD
+        self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
+
 
 def spawn_router_guides(env, n_guides, speed=2.0, seed=77):
-    """Spawn router guides at exits, each assigned to different junctions.
-
-    Junctions are split by territory so guides don't overlap.
-    Each guide gets the most central junctions in their territory."""
+    """Spawn router guides at exits, each assigned to a territory."""
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
-    all_junctions = _find_junctions(env)
+    rows, cols = env.grid.shape
+    mid_r, mid_c = rows // 2, cols // 2
 
-    if not all_junctions:
-        # Fallback: no junctions found, use patrol points
-        all_junctions = _find_patrol_points(env)
-
-    ranked = _rank_junctions_by_centrality(all_junctions, env.exits, env)
-
-    # Split junctions into territories
-    center_y = env.height / 2.0
-    center_x = env.width / 2.0
-
-    territories = [[] for _ in range(n_guides)]
     if n_guides == 1:
-        territories[0] = ranked
+        territories = [(0, rows, 0, cols)]
     elif n_guides == 2:
-        for j in ranked:
-            territories[0 if j[1] < center_y else 1].append(j)
+        territories = [(0, mid_r, 0, cols), (mid_r, rows, 0, cols)]
+    elif n_guides <= 4:
+        territories = [
+            (0, mid_r, 0, mid_c), (0, mid_r, mid_c, cols),
+            (mid_r, rows, 0, mid_c), (mid_r, rows, mid_c, cols)]
     else:
-        for j in ranked:
-            idx = (0 if j[0] < center_x else 1) + (0 if j[1] < center_y else 2)
-            territories[idx % n_guides].append(j)
+        base = [(0,mid_r,0,mid_c),(0,mid_r,mid_c,cols),
+                (mid_r,rows,0,mid_c),(mid_r,rows,mid_c,cols)]
+        territories = [base[i%4] for i in range(n_guides)]
 
     guides = []
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
-        juncs = territories[i] if territories[i] else ranked
-        # Re-rank by centrality within territory
-        juncs = _rank_junctions_by_centrality(juncs, env.exits, env)
-        guide = RouterGuide(ex, ey, speed, env, rng, assigned_junctions=juncs)
-        guides.append(guide)
+        t = territories[i] if i < len(territories) else territories[0]
+        guides.append(RouterGuide(ex, ey, speed, env, rng, territory_bounds=t))
     return guides
