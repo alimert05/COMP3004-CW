@@ -200,9 +200,9 @@ class Guide:
         # Guides know ALL exit locations (trained, have map)
         self.known_exits = list(env.exits)
 
-        # Guides can broadcast their position to nearby civilians
-        # This is much larger than civilian vision (megaphone, whistle, torch)
-        self.broadcast_radius = 80.0  # 8 cells
+        # Beacon broadcast radius (sound-based: megaphone/whistle)
+        # 100 units = 10 cells = ~30m at 3m/cell scale
+        self.broadcast_radius = 100.0  # 10 cells
 
         # Guides are alive unless fire kills them (they have gas masks for smoke)
         self.alive = True
@@ -527,32 +527,51 @@ class BeaconGuide(Guide):
                 self._follow_path(env)
             return
 
-        # --- Phase 2: In position — broadcast to nearby civilians ---
-        radius = self.get_broadcast_radius(smoke)
+        # --- Phase 2: Probabilistic broadcast (sound-based) ---
+        # Hearing probability decreases with distance and smoke/noise.
+        # Sound penetrates walls (no LOS check) but attenuates.
+        # Based on acoustic propagation in fire conditions.
+        max_range = self.broadcast_radius  # 100 units (10 cells / ~30m)
 
-        from evacsim.civilian import MOVING_TO_EXIT, ESCAPED, DEAD, IDLE, REACTING
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
 
         exit_pos = (self.assigned_exit[0], self.assigned_exit[1])
 
         for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
 
             dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius:
-                if civ.state == IDLE:
-                    # Fix #1: Wake up idle civilians — guide is shouting!
-                    civ.state = REACTING
-                    civ._reaction_counter = 0
-                    civ._reaction_delay = min(civ._reaction_delay, 10)
-                    civ._guide_told_exit = exit_pos  # Remember exit for after reaction
-                elif civ.state == REACTING:
-                    # Fix #2: Speed up reaction — hearing a guide snaps you out faster
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    civ._guide_told_exit = exit_pos
-                else:
-                    # Active civilian — give them the exit location
-                    civ._set_exit_target(env, exit_pos)
+            if dist >= max_range:
+                continue
+
+            # Distance factor: linear falloff (closer = easier to hear)
+            distance_factor = 1.0 - (dist / max_range)
+
+            # Smoke factor: fire noise + smoke reduces hearing
+            # Smoke at CIVILIAN's position (they're the listener)
+            civ_smoke = smoke.get_density_at(civ.pos[0], civ.pos[1])
+            smoke_factor = max(0.3, 1.0 - civ_smoke * 0.5)
+
+            # Final hearing probability this tick
+            hear_chance = distance_factor * smoke_factor
+
+            # Roll the dice
+            if self._rng.random() > hear_chance:
+                continue  # Didn't hear this tick — try again next tick
+
+            # Civilian heard the guide!
+            if civ.state == IDLE:
+                civ.state = REACTING
+                civ._reaction_counter = 0
+                civ._reaction_delay = min(civ._reaction_delay, 10)
+                civ._guide_told_exit = exit_pos
+            elif civ.state == REACTING:
+                civ._reaction_delay = min(civ._reaction_delay, 5)
+                civ._guide_told_exit = exit_pos
+            else:
+                civ._set_exit_target(env, exit_pos)
 
 
 def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
