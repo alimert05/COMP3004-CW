@@ -556,24 +556,25 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
 # ════════════════════════════════════════════════════════════════════
 
 def _find_patrol_points(env: Environment):
-    """Find patrol points using room detection + grid scan.
+    """Find patrol points using hybrid room detection + grid scan.
 
-    Uses env.detect_rooms() to get actual room centers, then adds
-    corridor points via grid scan. This ensures every room in the
-    building gets a patrol point regardless of grid alignment."""
+    Strategy:
+      - Bottleneck maps (many rooms): use room centers as patrol points
+      - Open plan maps (few/no rooms): use denser grid scan for coverage
+      - Always de-duplicate to avoid overlapping patrol points
+    """
     rows, cols = env.grid.shape
     points = []
 
-    # 1. Add center of each detected room
+    # 1. Try room detection first
+    rooms = []
     try:
         rooms = env.detect_rooms()
         for room_cells in rooms:
             if not room_cells:
                 continue
-            # Find center of room
             avg_r = sum(r for r, c in room_cells) / len(room_cells)
             avg_c = sum(c for r, c in room_cells) / len(room_cells)
-            # Find the walkable cell nearest to center
             best, best_d = None, float("inf")
             for r, c in room_cells:
                 d = abs(r - avg_r) + abs(c - avg_c)
@@ -584,20 +585,27 @@ def _find_patrol_points(env: Environment):
                 wx, wy = env.grid_to_world(best[0], best[1])
                 points.append(np.array([wx, wy], dtype=float))
     except Exception:
-        pass  # Fall back to grid scan only
+        pass
 
-    # 2. Add corridor points via grid scan (every 5 rows for better coverage)
-    for r in range(2, rows - 2, 5):
-        for c in range(2, cols - 2, 10):
+    # 2. Grid scan — density depends on whether rooms were found
+    if len(rooms) >= 2:
+        # Bottleneck: rooms found. Add sparse corridor points as supplement
+        row_step, col_step = 5, 10
+    else:
+        # Open plan: no/few rooms. Use DENSE grid scan for full coverage
+        row_step, col_step = 4, 6
+
+    for r in range(2, rows - 2, row_step):
+        for c in range(2, cols - 2, col_step):
             if env.grid[r, c] != CellType.WALL:
                 wx, wy = env.grid_to_world(r, c)
                 points.append(np.array([wx, wy], dtype=float))
 
-    # De-duplicate: remove points within 4 cells of each other
+    # De-duplicate: remove points within 3 cells of each other
     if not points:
         return points
     filtered = [points[0]]
-    min_dist = env.cell_size * 4
+    min_dist = env.cell_size * 3
     for p in points[1:]:
         if all(np.linalg.norm(p - f) >= min_dist for f in filtered):
             filtered.append(p)
@@ -763,7 +771,12 @@ class SweeperGuide(Guide):
             self._follow_path(env)
 
     def _do_escorting(self, env, smoke, civilians):
-        """Lead group to exit."""
+        """Lead group to exit. If everyone died, abort and go back to patrol."""
+        if not self._group:
+            # Everyone died or escaped — no point going to exit
+            self._phase = self.RETURNING
+            self._advance_patrol(env)
+            return
         if not self._waypoints:
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
@@ -1278,6 +1291,12 @@ class RouterGuide(Guide):
     def _do_escorting(self, env, smoke, civilians):
         """Lead group to optimal exit. KEY: always pick up civilians on the
         way — no group limit while escorting. Maximize survivors per trip."""
+        if not self._group:
+            # Everyone died — abort escort, go back to scanning
+            self._phase = self.RETURNING
+            fg = getattr(self, '_fire_grid', None)
+            self._waypoints = bfs_path(self.env, self.pos, self._home_pos, fire_grid=fg)
+            return
         self._recruit_nearby_unlimited(env, smoke, civilians)
         if not self._waypoints:
             if self._escort_exit is not None:
