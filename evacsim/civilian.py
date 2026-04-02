@@ -42,12 +42,17 @@ DEAD = 10
 class Civilian:
 
     def __init__(self, x: float, y: float, speed: float,
-                 rng: np.random.Generator, vision_radius: float = 10.0):
+                 rng: np.random.Generator):
         self.pos = np.array([x, y], dtype=float)
         self.vel = np.array([0.0, 0.0])
         self.speed = speed
         self._rng = rng
-        self.vision_radius = vision_radius
+
+        # Two vision ranges (Jin 1978, Clark et al. 1985):
+        # People: large moving objects, easy to spot (Jin — reflecting objects)
+        # Exits: small static signs, easy to miss in panic (Clark — exit sign visibility)
+        self.people_vision_radius = 70.0  # 7 cells (~20m) — see people in clear air
+        self.exit_vision_radius = 25.0    # 2.5 cells (~7.5m) — see exit signs in clear air
 
         self.state = IDLE
 
@@ -58,6 +63,9 @@ class Civilian:
         # Potency: energy/health system (Kasereka 2018)
         # Random 50-100. Decreases in smoke/fire. NO recovery. At 0 = dead.
         self.potency = rng.uniform(50.0, 100.0)
+
+        # Herding commitment: once following a crowd, commit for N ticks
+        self._herding_commitment = 0
 
         # BFS waypoints + target
         self._waypoints = []
@@ -91,6 +99,8 @@ class Civilian:
         if self.state in (ESCAPED, DEAD):
             return
 
+        # Store references for helper methods
+        self._env_ref = env
         # Store fire grid for BFS calls within this tick
         self._fire_grid = fire.density
 
@@ -128,21 +138,22 @@ class Civilian:
             return
 
         # ── Vision & speed ──
-        eff_vision = self._calc_vision(local_smoke)
+        people_vision, exit_vision = self._calc_vision(local_smoke)
         speed = self._calc_speed(in_fire, in_smoke)
 
-        # ── Opportunistic: spot exit (not if following a guide) ──
-        if eff_vision > 0 and self.state not in (MOVING_TO_EXIT, FOLLOWING_GUIDE):
-            exit_pos = self._spot_exit(env, eff_vision)
+        # ── Opportunistic: spot exit (uses exit_vision — small signs, easy to miss) ──
+        if exit_vision > 0 and self.state not in (MOVING_TO_EXIT, FOLLOWING_GUIDE):
+            exit_pos = self._spot_exit(env, exit_vision)
             if exit_pos is not None:
                 self._set_exit_target(env, exit_pos)
 
-        # ── Rule 4: Herding (crowd direction) ──
-        if eff_vision > 0 and self.state == WANDERING:
-            crowd_dir = self._sense_crowd_direction(all_civilians, eff_vision * 3)
+        # ── Rule 4: Herding (uses people_vision — large moving objects, easy to spot) ──
+        if people_vision > 0 and self.state == WANDERING:
+            crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
             if crowd_dir is not None:
                 self._walk_dir = crowd_dir
                 self.state = FOLLOWING
+                self._herding_commitment = 20  # Commit to following for 20 ticks
 
         # ── State behaviors ──
 
@@ -171,22 +182,36 @@ class Civilian:
             if self._walk_dir is not None:
                 self.vel = self._walk_dir * speed
 
-            # Stuck while following crowd? Give up and wander
+            # Stuck while following crowd? Give up
             if self._stuck_ticks >= 8:
                 self.state = WANDERING
                 self._walk_dir = None
-            elif eff_vision > 0:
-                # Re-check crowd each tick
-                crowd_dir = self._sense_crowd_direction(all_civilians, eff_vision * 3)
-                if crowd_dir is not None:
-                    self._walk_dir = crowd_dir
-                else:
-                    self.state = WANDERING
-                    self._walk_dir = None
-                # Can we see an exit?
-                exit_pos = self._spot_exit(env, eff_vision)
-                if exit_pos is not None:
-                    self._set_exit_target(env, exit_pos)
+                self._herding_commitment = 0
+            else:
+                # Tick down commitment
+                self._herding_commitment = max(0, self._herding_commitment - 1)
+
+                if self._herding_commitment > 0:
+                    # Still committed — keep walking this direction, don't re-check
+                    # But still check for exits (always opportunistic)
+                    if exit_vision > 0:
+                        exit_pos = self._spot_exit(env, exit_vision)
+                        if exit_pos is not None:
+                            self._set_exit_target(env, exit_pos)
+                elif people_vision > 0:
+                    # Commitment expired — re-check crowd
+                    crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
+                    if crowd_dir is not None:
+                        self._walk_dir = crowd_dir
+                        self._herding_commitment = 20  # Re-commit
+                    else:
+                        # Lost the crowd — go back to wandering
+                        self.state = WANDERING
+                        self._walk_dir = None
+                    if exit_vision > 0:
+                        exit_pos = self._spot_exit(env, exit_vision)
+                        if exit_pos is not None:
+                            self._set_exit_target(env, exit_pos)
 
         elif self.state == FOLLOWING_GUIDE:
             guide = self.assigned_guide
@@ -213,12 +238,12 @@ class Civilian:
         elif self.state == WALL_FOLLOWING:
             # Blind in smoke: hand-on-wall
             self._do_wall_follow(env, speed)
-            if eff_vision > 0 and not in_smoke:
+            if people_vision > 10 and not in_smoke:
                 self.state = WANDERING
                 self._walk_dir = None
 
         elif self.state == WANDERING:
-            if in_smoke and eff_vision == 0:
+            if in_smoke and people_vision < 5:
                 # Blind → wall-follow
                 self.state = WALL_FOLLOWING
                 self._do_wall_follow(env, speed)
@@ -474,11 +499,14 @@ class Civilian:
     # ================================================================
 
     def _calc_vision(self, smoke_density):
-        if smoke_density > 0.5:
-            return 0.0
-        elif smoke_density > 0.2:
-            return self.vision_radius * max(0.0, 1.0 - smoke_density * 2.0)
-        return self.vision_radius
+        """Calculate two vision ranges (Jin 1978, Clark et al. 1985).
+        Returns (people_vision, exit_vision).
+        Civilians: eyes unprotected, smoke causes irritation + tearing.
+        Vision drops rapidly with smoke density."""
+        smoke_factor = max(0.15, 1.0 - smoke_density)
+        people_v = self.people_vision_radius * smoke_factor
+        exit_v = self.exit_vision_radius * smoke_factor
+        return people_v, exit_v
 
     def _calc_speed(self, in_fire, in_smoke):
         has_path = self.state in (FLEEING_ROOM, MOVING_TO_EXIT, FOLLOWING)
@@ -498,16 +526,19 @@ class Civilian:
     def _see_others_fleeing(self, all_civilians):
         """Kasereka 2018: 'when they see a person who evacuates the place,
         they shall run towards the nearest exit door.'
-        If a non-idle civilian is within vision range, we notice the danger."""
+        Must have line of sight — can't see through walls."""
+        env = getattr(self, '_env_ref', None)
         for other in all_civilians:
             if other is self:
                 continue
             if other.state in (IDLE, REACTING, ESCAPED, DEAD):
                 continue
-            # Other civilian is actively moving (fleeing/wandering/etc.)
             d = np.linalg.norm(self.pos - other.pos)
-            if d < self.vision_radius * 2:  # 2 cells — can see someone running nearby
-                return True
+            if d < self.people_vision_radius * 0.5:
+                if env is not None and self._has_los(other.pos, env):
+                    return True
+                elif env is None:
+                    return True  # Fallback if env not set yet
         return False
 
     def _sense_danger(self, env, smoke, fire):
@@ -522,19 +553,34 @@ class Civilian:
                         return True
         return False
 
+    def _has_los(self, target_pos, env):
+        """Line of sight check — can we see the target without walls blocking?"""
+        diff = target_pos - self.pos
+        dist = np.linalg.norm(diff)
+        if dist < env.cell_size:
+            return True
+        direction = diff / dist
+        steps = int(dist / env.cell_size) + 1
+        for i in range(1, min(steps + 1, 20)):
+            cx = self.pos[0] + direction[0] * env.cell_size * i
+            cy = self.pos[1] + direction[1] * env.cell_size * i
+            if not env.is_walkable(cx, cy):
+                return False
+        return True
+
     def _spot_exit(self, env, eff_vision):
-        """Find nearest exit within vision."""
+        """Find nearest exit within vision AND line of sight."""
         best, best_d = None, float("inf")
         for ex, ey in env.exits:
             d = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
             if d < eff_vision and d < best_d:
-                best, best_d = (ex, ey), d
+                if self._has_los(np.array([ex, ey]), env):
+                    best, best_d = (ex, ey), d
         return best
 
     def _sense_crowd_direction(self, all_civilians, radius):
-        """Rule 4: Herding — average direction of nearby moving civilians.
-        If 2+ nearby civilians are moving, bias toward their average direction.
-        This is crowd-level herding, not 1-to-1 following (Helbing 2000)."""
+        """Rule 4: Herding — average direction of nearby VISIBLE moving civilians.
+        Requires line of sight — can't see through walls (Helbing 2000)."""
         avg_dir = np.zeros(2)
         count = 0
 
@@ -544,9 +590,11 @@ class Civilian:
             d = np.linalg.norm(self.pos - other.pos)
             if d < radius and d > 0:
                 other_speed = np.linalg.norm(other.vel)
-                if other_speed > 0.5:  # Only count civilians actually moving
-                    avg_dir += other.vel / other_speed
-                    count += 1
+                if other_speed > 0.5:
+                    # Must have line of sight — can't see through walls
+                    if self._has_los(other.pos, self._env_ref):
+                        avg_dir += other.vel / other_speed
+                        count += 1
 
         if count >= 2:
             norm = np.linalg.norm(avg_dir)

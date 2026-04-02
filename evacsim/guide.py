@@ -329,12 +329,15 @@ class Guide:
     def get_visual_recruit_radius(self, smoke: SmokeSystem) -> float:
         """Visual recruit range based on Jin (1978) visibility model.
         Guide is a light-emitting object (hi-vis gear, flashlight).
-        Visibility = K/Cs, scaling linearly with smoke density.
-        At 1 cell = 3 meters: 7 cells (~20m) in clear air.
+        Guide wears breathing apparatus — smoke reduces vision by 60%
+        of what it does to unprotected civilians (mask prevents eye
+        irritation, Jin 1978 showed irritation is the main vision reducer).
         Used by Sweeper and Router (physical contact, not broadcast)."""
         local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
         base_range = 70.0  # 7 cells in clear air (~20m at 3m/cell)
-        return base_range * max(0.15, 1.0 - local_smoke)
+        # Mask reduces smoke's effect by 40% (only particle obscuration remains)
+        smoke_effect = local_smoke * 0.6
+        return base_range * max(0.15, 1.0 - smoke_effect)
 
     def _has_line_of_sight(self, target_pos, env) -> bool:
         """Ray-cast: can we see the target without a wall blocking?
