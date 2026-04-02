@@ -290,12 +290,21 @@ while running:
             bar_col = (220, 50, 50)
         pygame.draw.rect(screen, bar_col, (bar_x, bar_y, int(bar_w * health), bar_h))
 
-        # Draw broadcast radius circle (only if not evacuating)
+        # Draw radius circle — different for each policy type
         if not guide._self_evacuating:
-            brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
-            broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
-            pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
-            screen.blit(broadcast_surf, (gx - brad, gy - brad))
+            from evacsim.guide import BeaconGuide
+            if isinstance(guide, BeaconGuide):
+                # Beacon: broadcast radius (sound-based, through walls)
+                brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
+                broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
+                pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
+                screen.blit(broadcast_surf, (gx - brad, gy - brad))
+            else:
+                # Sweeper/Router: visual recruit radius (Jin 1978, smaller, LOS)
+                vrad = int(guide.get_visual_recruit_radius(smoke_system) * SCALE)
+                recruit_surf = pygame.Surface((vrad * 2, vrad * 2), pygame.SRCALPHA)
+                pygame.draw.circle(recruit_surf, (100, 200, 255, 25), (vrad, vrad), vrad)
+                screen.blit(recruit_surf, (gx - vrad, gy - vrad))
 
     # Advance animation
     frame_timer += 1

@@ -326,6 +326,32 @@ class Guide:
         # Minimum 30 units (3 cells) even in full smoke
         return max(30.0, self.broadcast_radius * (1.0 - local_smoke * 0.5))
 
+    def get_visual_recruit_radius(self, smoke: SmokeSystem) -> float:
+        """Visual recruit range based on Jin (1978) visibility model.
+        Guide is a light-emitting object (hi-vis gear, flashlight).
+        Visibility = K/Cs, scaling linearly with smoke density.
+        At 1 cell = 3 meters: 7 cells (~20m) in clear air.
+        Used by Sweeper and Router (physical contact, not broadcast)."""
+        local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
+        base_range = 70.0  # 7 cells in clear air (~20m at 3m/cell)
+        return base_range * max(0.15, 1.0 - local_smoke)
+
+    def _has_line_of_sight(self, target_pos, env) -> bool:
+        """Ray-cast: can we see the target without a wall blocking?
+        Used for visual recruit — Sweeper/Router can't recruit through walls."""
+        diff = target_pos - self.pos
+        dist = np.linalg.norm(diff)
+        if dist < env.cell_size:
+            return True
+        direction = diff / dist
+        steps = int(dist / env.cell_size) + 1
+        for i in range(1, min(steps + 1, 25)):
+            cx = self.pos[0] + direction[0] * env.cell_size * i
+            cy = self.pos[1] + direction[1] * env.cell_size * i
+            if not env.is_walkable(cx, cy):
+                return False
+        return True
+
     def _follow_path(self, env: Environment) -> None:
         """Follow the pre-computed waypoint path.
         Checks ahead for fire AND heavy smoke — reroutes if dangerous.
@@ -850,14 +876,12 @@ class SweeperGuide(Guide):
     # ── Recruit & release ──
 
     def _recruit_nearby(self, env, smoke, civilians):
-        """Add nearby civilians to group.
-        Uses SMALLER radius than broadcast — guide needs to be close enough
-        that civilians can physically follow through doorways."""
+        """Recruit nearby civilians using visual range (Jin, 1978).
+        Range based on visibility of light-emitting objects in smoke.
+        Requires line of sight — walls block recruitment."""
         if len(self._group) >= self._max_group:
             return
-        # Recruit radius: 4 cells (40 units) — much smaller than broadcast (80)
-        # Civilians need to be close enough to actually follow
-        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
+        radius = self.get_visual_recruit_radius(smoke)
 
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE)
@@ -871,7 +895,7 @@ class SweeperGuide(Guide):
                 continue
 
             dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius:
+            if dist < radius and self._has_line_of_sight(civ.pos, env):
                 # Wake up idle/reacting civilians
                 if civ.state == IDLE:
                     civ.state = REACTING
@@ -1398,10 +1422,10 @@ class RouterGuide(Guide):
         return best_pos
 
     def _recruit_nearby(self, env, smoke, civilians):
-        """Recruit stuck nearby civilians into group."""
+        """Recruit nearby civilians using visual range (Jin, 1978) + LOS."""
         if len(self._group) >= self._max_group:
             return
-        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
+        radius = self.get_visual_recruit_radius(smoke)
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE)
         for civ in civilians:
@@ -1412,7 +1436,7 @@ class RouterGuide(Guide):
             if civ.assigned_guide is not None:
                 continue
             dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius:
+            if dist < radius and self._has_line_of_sight(civ.pos, env):
                 if civ.state == IDLE:
                     civ.state = REACTING
                     civ._reaction_counter = 0
@@ -1428,9 +1452,8 @@ class RouterGuide(Guide):
 
     def _recruit_nearby_unlimited(self, env, smoke, civilians):
         """Recruit ANY nearby civilian while escorting — no group limit.
-        If you're walking to the exit and pass civilians, pick them up.
-        This maximizes survivors per trip (Router's key intelligence)."""
-        radius = min(env.cell_size * 4, self.get_broadcast_radius(smoke))
+        Uses Jin (1978) visual range + LOS. Picks up everyone on the way."""
+        radius = self.get_visual_recruit_radius(smoke)
         from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
                                        IDLE, REACTING, FOLLOWING_GUIDE)
         for civ in civilians:
@@ -1439,7 +1462,7 @@ class RouterGuide(Guide):
             if civ.assigned_guide is not None:
                 continue
             dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius:
+            if dist < radius and self._has_line_of_sight(civ.pos, env):
                 if civ.state == IDLE:
                     civ.state = REACTING
                     civ._reaction_counter = 0
