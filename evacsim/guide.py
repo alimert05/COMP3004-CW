@@ -729,16 +729,29 @@ class SweeperGuide(Guide):
             self._start_escort(env)
             return
 
+        # SMOKE CHECK: if current location is dangerous AND we have a group,
+        # stop collecting and escort them out immediately
+        local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
+        local_fire = 0.0
+        fg = getattr(self, '_fire_grid', None)
+        if fg is not None:
+            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+            if 0 <= gr < fg.shape[0] and 0 <= gc < fg.shape[1]:
+                local_fire = fg[gr, gc]
+
+        if self._group and (local_smoke > 0.3 or local_fire > 0.1):
+            # Danger here! Escort group out NOW
+            self._start_escort(env)
+            return
+
         if self._waiting:
             self._wait_counter += 1
             if self._wait_counter >= self._wait_ticks:
                 self._waiting = False
                 if self._group:
-                    # Got some people — check if more nearby
                     if self._count_recruitable(env, smoke, civilians) == 0:
                         self._start_escort(env)
                         return
-                # Next patrol point
                 self._advance_patrol(env)
             return
 
@@ -805,6 +818,13 @@ class SweeperGuide(Guide):
         if len(self._group) >= self._max_group:
             self._start_escort(env)
             return
+
+        # If we picked up civilians on the way AND we're in smoke, escort them out
+        if self._group:
+            local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
+            if local_smoke > 0.3:
+                self._start_escort(env)
+                return
 
         if not self._waypoints:
             self._phase = self.COLLECTING
@@ -926,14 +946,33 @@ class SweeperGuide(Guide):
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
     def _advance_patrol(self, env):
-        """Move to next patrol point. If carrying a group, avoid smoke too."""
+        """Move to next patrol point. Skip points that are now in smoke/fire."""
         if not self._patrol_route:
             return
-        self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
+
         fg = getattr(self, '_fire_grid', None)
-        # When carrying a group, combine fire+smoke into danger grid
+        sg = getattr(self, '_smoke_grid', None)
+
+        # Try up to len(route) points to find a safe one
+        for _ in range(len(self._patrol_route)):
+            self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
+            target = self._patrol_route[self._patrol_idx]
+            tr, tc = env.world_to_grid(target[0], target[1])
+
+            # Skip patrol points that are now in fire or heavy smoke
+            is_dangerous = False
+            if fg is not None and 0 <= tr < fg.shape[0] and 0 <= tc < fg.shape[1]:
+                if fg[tr, tc] > 0.2:
+                    is_dangerous = True
+            if sg is not None and 0 <= tr < sg.shape[0] and 0 <= tc < sg.shape[1]:
+                if sg[tr, tc] > 0.5:
+                    is_dangerous = True
+
+            if not is_dangerous:
+                break  # Found a safe patrol point
+
+        # Compute path — avoid smoke if carrying group
         if self._group:
-            sg = getattr(self, '_smoke_grid', None)
             if fg is not None and sg is not None:
                 danger = np.maximum(fg, sg * 0.5)
             elif fg is not None:
@@ -944,7 +983,6 @@ class SweeperGuide(Guide):
                 danger = None
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger)
         else:
-            # No group — just avoid fire (guide has gas mask for smoke)
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg)
 
 
