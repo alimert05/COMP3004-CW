@@ -506,8 +506,7 @@ class BeaconGuide(Guide):
         return best
 
     def _find_beacon_position(self) -> np.ndarray:
-        """Find a walkable position 2-3 cells inward from the exit.
-        Uses BFS from the exit cell to find the best spot inside the building."""
+        """Find a walkable position right in front of the exit (1 cell inward)."""
         ex, ey = self.assigned_exit
         gr, gc = self.env.world_to_grid(ex, ey)
         rows, cols = self.env.grid.shape
@@ -517,20 +516,17 @@ class BeaconGuide(Guide):
         queue.append((gr, gc, 0))
         visited.add((gr, gc))
 
-        best_pos = self.assigned_exit.copy()  # fallback
-        best_dist = 0
+        best_pos = self.assigned_exit.copy()  # fallback: stand on exit
 
         while queue:
             r, c, d = queue.popleft()
-            if d > 4:
+            if d > 2:
                 continue
 
-            # We want cells 2-3 steps away that are FLOOR (not exit, not wall)
-            if 2 <= d <= 3 and self.env.grid[r, c] == CellType.FLOOR:
-                if d > best_dist:
-                    best_dist = d
-                    bx, by = self.env.grid_to_world(r, c)
-                    best_pos = np.array([bx, by])
+            # Stand 1 cell from exit (right in front of the door)
+            if d == 1 and self.env.grid[r, c] == CellType.FLOOR:
+                bx, by = self.env.grid_to_world(r, c)
+                return np.array([bx, by])
 
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nr, nc = r + dr, c + dc
@@ -619,94 +615,17 @@ class BeaconGuide(Guide):
 def spawn_beacon_guides(
     env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77
 ) -> list[BeaconGuide]:
-    """Spawn beacon guides spread across EXITS (not building interior).
-
-    Beacons belong near exits — like firefighters with megaphones at exit doors.
-    Each guide goes to a different exit. If more guides than exits, extras
-    spread a short distance along the corridor to reduce overlap.
-    Deep rooms remain unreached — that's Beacon's limitation.
-    """
+    """Spawn beacon guides at exits. Simple round-robin assignment.
+    Each guide stands 2-3 cells from its assigned exit and broadcasts.
+    Overlap on clustered-exit maps is a realistic Beacon limitation."""
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
 
-    # Group nearby exit cells into clusters (same door = one cluster)
-    clusters = []
-    used = set()
-    for i, (ex, ey) in enumerate(exits):
-        if i in used:
-            continue
-        cluster = [(ex, ey)]
-        used.add(i)
-        for j, (ox, oy) in enumerate(exits):
-            if j not in used and np.hypot(ex - ox, ey - oy) < env.cell_size * 3:
-                cluster.append((ox, oy))
-                used.add(j)
-        clusters.append(cluster)
-
-    # Track how many guides assigned to each cluster
-    cluster_counts = {}
-    for i in range(n_guides):
-        cidx = i % len(clusters)
-        cluster_counts[cidx] = cluster_counts.get(cidx, 0) + 1
-
-    # Assign guides — first guide at exit, extras offset along corridor
-    slot_counter = {}
     guides = []
-
     for i in range(n_guides):
-        cidx = i % len(clusters)
-        slot = slot_counter.get(cidx, 0)
-        slot_counter[cidx] = slot + 1
-
-        # Spawn at first exit in cluster
-        ex, ey = clusters[cidx][0]
-
-        if slot == 0:
-            # First guide at this exit — standard position (2-3 cells from exit)
-            guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=(ex, ey))
-        else:
-            # Extra guide — find position 5-6 cells along corridor from exit
-            # BFS from exit, find a walkable cell at depth 5-6 that's NOT
-            # in the same direction as other guides at this exit
-            gr, gc = env.world_to_grid(ex, ey)
-            rows, cols = env.grid.shape
-
-            visited = set()
-            q = deque()
-            q.append((gr, gc, 0))
-            visited.add((gr, gc))
-            target_depth = 5 + slot * 5  # 5 cells for 2nd, 10 for 3rd, etc.
-            beacon_pos = None
-
-            # Prefer direction based on slot (alternate up/down)
-            while q:
-                r, c, d = q.popleft()
-                if d > target_depth + 3:
-                    continue
-                if (
-                    target_depth <= d <= target_depth + 2
-                    and env.grid[r, c] != CellType.WALL
-                ):
-                    # Prefer different direction from slot 0
-                    if slot % 2 == 1:
-                        direction_ok = r <= gr  # Go upward
-                    else:
-                        direction_ok = r >= gr  # Go downward
-                    if direction_ok:
-                        beacon_pos = np.array(env.grid_to_world(r, c), dtype=float)
-                        break
-                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nr, nc = r + dr, c + dc
-                    if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
-                        if env.grid[nr, nc] != CellType.WALL:
-                            visited.add((nr, nc))
-                            q.append((nr, nc, d + 1))
-
-            if beacon_pos is not None:
-                guide = BeaconGuide(ex, ey, speed, env, rng, beacon_pos=beacon_pos)
-            else:
-                guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=(ex, ey))
-
+        assigned_exit = exits[i % len(exits)]
+        ex, ey = assigned_exit
+        guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=assigned_exit)
         guides.append(guide)
 
     return guides

@@ -32,6 +32,6 @@ class SimConfig:
 # --- Visual mode settings (used by test_map_visual.py only) ---
 
 CIVILIAN_NUMBER = 100
-GUIDE_POLICY = "sweeper"
+GUIDE_POLICY = "beacon"
 GUIDES_ENABLED = True
 GUIDE_COUNT = None
