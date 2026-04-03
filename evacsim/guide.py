@@ -506,7 +506,7 @@ class BeaconGuide(Guide):
         return best
 
     def _find_beacon_position(self) -> np.ndarray:
-        """Find a walkable position right in front of the exit (1 cell inward)."""
+        """Find a walkable position 2-3 cells inward from the exit."""
         ex, ey = self.assigned_exit
         gr, gc = self.env.world_to_grid(ex, ey)
         rows, cols = self.env.grid.shape
@@ -516,17 +516,19 @@ class BeaconGuide(Guide):
         queue.append((gr, gc, 0))
         visited.add((gr, gc))
 
-        best_pos = self.assigned_exit.copy()  # fallback: stand on exit
+        best_pos = self.assigned_exit.copy()
+        best_dist = 0
 
         while queue:
             r, c, d = queue.popleft()
-            if d > 2:
+            if d > 4:
                 continue
 
-            # Stand 1 cell from exit (right in front of the door)
-            if d == 1 and self.env.grid[r, c] == CellType.FLOOR:
-                bx, by = self.env.grid_to_world(r, c)
-                return np.array([bx, by])
+            if 2 <= d <= 3 and self.env.grid[r, c] == CellType.FLOOR:
+                if d > best_dist:
+                    best_dist = d
+                    bx, by = self.env.grid_to_world(r, c)
+                    best_pos = np.array([bx, by])
 
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nr, nc = r + dr, c + dc
