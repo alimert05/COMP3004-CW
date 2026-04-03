@@ -450,21 +450,29 @@ class BeaconGuide(Guide):
 
     def __init__(self, x: float, y: float, speed: float,
                  env: Environment, rng: np.random.Generator,
-                 assigned_exit: tuple = None):
+                 assigned_exit: tuple = None,
+                 beacon_pos: np.ndarray = None):
         super().__init__(x, y, speed, env, rng)
 
-        # Assign to nearest exit if not specified
-        if assigned_exit is not None:
-            self.assigned_exit = np.array(assigned_exit, dtype=float)
+        # Beacon position: territory center (from spawn) or near exit (fallback)
+        if beacon_pos is not None:
+            self._beacon_pos = beacon_pos
+            # Broadcast nearest exit to THIS position (not spawn position)
+            best, best_d = None, float("inf")
+            for ex, ey in self.known_exits:
+                d = np.hypot(beacon_pos[0] - ex, beacon_pos[1] - ey)
+                if d < best_d:
+                    best_d = d
+                    best = np.array([ex, ey], dtype=float)
+            self.assigned_exit = best if best is not None else np.array(self.known_exits[0], dtype=float)
         else:
-            self.assigned_exit = self._find_nearest_exit()
+            if assigned_exit is not None:
+                self.assigned_exit = np.array(assigned_exit, dtype=float)
+            else:
+                self.assigned_exit = self._find_nearest_exit()
+            self._beacon_pos = self._find_beacon_position()
 
-        # Find beacon position (2-3 cells inward from exit)
-        self._beacon_pos = self._find_beacon_position()
-
-        # Compute BFS path from spawn to beacon position
         self._waypoints = bfs_path(env, self.pos, self._beacon_pos)
-
         self._in_position = False
 
     def _find_nearest_exit(self) -> np.ndarray:
@@ -584,21 +592,93 @@ class BeaconGuide(Guide):
 
 def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
                         seed: int = 77) -> list[BeaconGuide]:
-    """Spawn beacon guides AT the exits (realistic — firefighters enter from outside).
+    """Spawn beacon guides spread across EXITS (not building interior).
 
-    Each guide starts at an assigned exit and walks inward to their beacon position.
-    If more guides than exits, multiple guides share exits (round-robin).
+    Beacons belong near exits — like firefighters with megaphones at exit doors.
+    Each guide goes to a different exit. If more guides than exits, extras
+    spread a short distance along the corridor to reduce overlap.
+    Deep rooms remain unreached — that's Beacon's limitation.
     """
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
 
-    guides = []
+    # Group nearby exit cells into clusters (same door = one cluster)
+    clusters = []
+    used = set()
+    for i, (ex, ey) in enumerate(exits):
+        if i in used:
+            continue
+        cluster = [(ex, ey)]
+        used.add(i)
+        for j, (ox, oy) in enumerate(exits):
+            if j not in used and np.hypot(ex - ox, ey - oy) < env.cell_size * 3:
+                cluster.append((ox, oy))
+                used.add(j)
+        clusters.append(cluster)
+
+    # Track how many guides assigned to each cluster
+    cluster_counts = {}
     for i in range(n_guides):
-        # Round-robin assign exits
-        assigned_exit = exits[i % len(exits)]
-        ex, ey = assigned_exit
-        # Spawn AT the exit position
-        guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=assigned_exit)
+        cidx = i % len(clusters)
+        cluster_counts[cidx] = cluster_counts.get(cidx, 0) + 1
+
+    # Assign guides — first guide at exit, extras offset along corridor
+    slot_counter = {}
+    guides = []
+
+    for i in range(n_guides):
+        cidx = i % len(clusters)
+        slot = slot_counter.get(cidx, 0)
+        slot_counter[cidx] = slot + 1
+
+        # Spawn at first exit in cluster
+        ex, ey = clusters[cidx][0]
+
+        if slot == 0:
+            # First guide at this exit — standard position (2-3 cells from exit)
+            guide = BeaconGuide(ex, ey, speed, env, rng,
+                                assigned_exit=(ex, ey))
+        else:
+            # Extra guide — find position 5-6 cells along corridor from exit
+            # BFS from exit, find a walkable cell at depth 5-6 that's NOT
+            # in the same direction as other guides at this exit
+            gr, gc = env.world_to_grid(ex, ey)
+            rows, cols = env.grid.shape
+
+            visited = set()
+            q = deque()
+            q.append((gr, gc, 0))
+            visited.add((gr, gc))
+            target_depth = 5 + slot * 5  # 5 cells for 2nd, 10 for 3rd, etc.
+            beacon_pos = None
+
+            # Prefer direction based on slot (alternate up/down)
+            while q:
+                r, c, d = q.popleft()
+                if d > target_depth + 3:
+                    continue
+                if target_depth <= d <= target_depth + 2 and env.grid[r, c] != CellType.WALL:
+                    # Prefer different direction from slot 0
+                    if slot % 2 == 1:
+                        direction_ok = r <= gr  # Go upward
+                    else:
+                        direction_ok = r >= gr  # Go downward
+                    if direction_ok:
+                        beacon_pos = np.array(env.grid_to_world(r, c), dtype=float)
+                        break
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                        if env.grid[nr, nc] != CellType.WALL:
+                            visited.add((nr, nc))
+                            q.append((nr, nc, d + 1))
+
+            if beacon_pos is not None:
+                guide = BeaconGuide(ex, ey, speed, env, rng, beacon_pos=beacon_pos)
+            else:
+                guide = BeaconGuide(ex, ey, speed, env, rng,
+                                    assigned_exit=(ex, ey))
+
         guides.append(guide)
 
     return guides
