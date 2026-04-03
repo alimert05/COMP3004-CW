@@ -794,20 +794,38 @@ class SweeperGuide(Guide):
             self._start_escort(env)
             return
 
-        # SMOKE CHECK: if current location is dangerous AND we have a group,
-        # stop collecting and escort them out immediately
-        local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
-        local_fire = 0.0
-        fg = getattr(self, '_fire_grid', None)
-        if fg is not None:
-            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
-            if 0 <= gr < fg.shape[0] and 0 <= gc < fg.shape[1]:
-                local_fire = fg[gr, gc]
+        # DANGER CHECK: proactive detection — check guide surroundings + group members
+        if self._group:
+            danger = False
+            sg = getattr(self, '_smoke_grid', None)
+            fg = getattr(self, '_fire_grid', None)
+            rows, cols = env.grid.shape
 
-        if self._group and (local_smoke > 0.3 or local_fire > 0.1):
-            # Danger here! Escort group out NOW
-            self._start_escort(env)
-            return
+            # Check 2-cell radius around guide (proactive — detect approaching smoke)
+            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = gr + dr, gc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if fg is not None and fg[nr, nc] > 0.1:
+                            danger = True
+                            break
+                        if sg is not None and sg[nr, nc] > 0.4:
+                            danger = True
+                            break
+                if danger:
+                    break
+
+            # Check if any group member is in smoke (they don't have masks)
+            if not danger:
+                for civ in self._group:
+                    if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                        danger = True
+                        break
+
+            if danger:
+                self._start_escort(env)
+                return
 
         if self._waiting:
             self._wait_counter += 1
@@ -880,10 +898,29 @@ class SweeperGuide(Guide):
             self._start_escort(env)
             return
 
-        # If we picked up civilians on the way AND we're in smoke, escort them out
+        # If we picked up civilians — check danger (guide surroundings + group members)
         if self._group:
-            local_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
-            if local_smoke > 0.3:
+            danger = False
+            # Check group members first (they're vulnerable)
+            for civ in self._group:
+                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                    danger = True
+                    break
+            # Check guide surroundings (2-cell radius)
+            if not danger:
+                sg = getattr(self, '_smoke_grid', None)
+                if sg is not None:
+                    gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+                    rows, cols = sg.shape
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            nr, nc = gr + dr, gc + dc
+                            if 0 <= nr < rows and 0 <= nc < cols and sg[nr, nc] > 0.4:
+                                danger = True
+                                break
+                        if danger:
+                            break
+            if danger:
                 self._start_escort(env)
                 return
 
