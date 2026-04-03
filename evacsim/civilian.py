@@ -66,6 +66,7 @@ class Civilian:
 
         # Herding commitment: once following a crowd, commit for N ticks
         self._herding_commitment = 0
+        self._herding_leader = None  # Specific civilian we're following
 
         # BFS waypoints + target
         self._waypoints = []
@@ -147,13 +148,22 @@ class Civilian:
             if exit_pos is not None:
                 self._set_exit_target(env, exit_pos)
 
-        # ── Rule 4: Herding (uses people_vision — large moving objects, easy to spot) ──
+        # ── Rule 4: Herding — follow someone who knows the way ──
         if people_vision > 0 and self.state == WANDERING:
-            crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
-            if crowd_dir is not None:
-                self._walk_dir = crowd_dir
+            leader = self._find_goal_leader(all_civilians, people_vision)
+            if leader is not None:
+                # Found someone heading to exit — follow them
+                self._herding_leader = leader
                 self.state = FOLLOWING
-                self._herding_commitment = 20  # Commit to following for 20 ticks
+                self._herding_commitment = 20
+            else:
+                # No goal-directed person, but check crowd direction as fallback
+                crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
+                if crowd_dir is not None:
+                    self._walk_dir = crowd_dir
+                    self._herding_leader = None
+                    self.state = FOLLOWING
+                    self._herding_commitment = 20
 
         # ── State behaviors ──
 
@@ -178,36 +188,61 @@ class Civilian:
             self.vel = np.zeros(2)
 
         elif self.state == FOLLOWING:
-            # Rule 4: walk in crowd direction
-            if self._walk_dir is not None:
+            leader = self._herding_leader
+
+            # Following a specific leader vs crowd direction
+            if leader is not None:
+                # Leader died, escaped, or we lost line of sight?
+                if leader.state in (ESCAPED, DEAD):
+                    leader = None
+                    self._herding_leader = None
+                elif people_vision > 0:
+                    d = np.linalg.norm(self.pos - leader.pos)
+                    if d > people_vision or not self._has_los(leader.pos, env):
+                        leader = None
+                        self._herding_leader = None
+
+            if leader is not None:
+                # Follow the specific leader (direct vector — not boids)
+                diff = leader.pos - self.pos
+                dist = np.linalg.norm(diff)
+                if dist > 1.0:
+                    self.vel = (diff / dist) * speed
+            elif self._walk_dir is not None:
+                # Fallback: follow crowd direction
                 self.vel = self._walk_dir * speed
 
-            # Stuck while following crowd? Give up
+            # Stuck? Give up
             if self._stuck_ticks >= 8:
                 self.state = WANDERING
                 self._walk_dir = None
+                self._herding_leader = None
                 self._herding_commitment = 0
             else:
-                # Tick down commitment
                 self._herding_commitment = max(0, self._herding_commitment - 1)
 
                 if self._herding_commitment > 0:
-                    # Still committed — keep walking this direction, don't re-check
-                    # But still check for exits (always opportunistic)
+                    # Still committed — keep following, but check for exits
                     if exit_vision > 0:
                         exit_pos = self._spot_exit(env, exit_vision)
                         if exit_pos is not None:
                             self._set_exit_target(env, exit_pos)
                 elif people_vision > 0:
-                    # Commitment expired — re-check crowd
-                    crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
-                    if crowd_dir is not None:
-                        self._walk_dir = crowd_dir
-                        self._herding_commitment = 20  # Re-commit
+                    # Commitment expired — re-check for leader or crowd
+                    new_leader = self._find_goal_leader(all_civilians, people_vision)
+                    if new_leader is not None:
+                        self._herding_leader = new_leader
+                        self._herding_commitment = 20
                     else:
-                        # Lost the crowd — go back to wandering
-                        self.state = WANDERING
-                        self._walk_dir = None
+                        crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
+                        if crowd_dir is not None:
+                            self._walk_dir = crowd_dir
+                            self._herding_leader = None
+                            self._herding_commitment = 20
+                        else:
+                            self.state = WANDERING
+                            self._walk_dir = None
+                            self._herding_leader = None
                     if exit_vision > 0:
                         exit_pos = self._spot_exit(env, exit_vision)
                         if exit_pos is not None:
@@ -540,6 +575,23 @@ class Civilian:
                 elif env is None:
                     return True  # Fallback if env not set yet
         return False
+
+    def _find_goal_leader(self, all_civilians, radius):
+        """Find nearest VISIBLE civilian who has a goal (MOVING_TO_EXIT or FLEEING_ROOM).
+        These are people who look like they know where they're going.
+        In real life: you follow the confident person, not the panicking crowd."""
+        env = getattr(self, '_env_ref', None)
+        best, best_d = None, float("inf")
+        for other in all_civilians:
+            if other is self:
+                continue
+            if other.state not in (MOVING_TO_EXIT, FLEEING_ROOM):
+                continue
+            d = np.linalg.norm(self.pos - other.pos)
+            if d < radius and d < best_d:
+                if env is not None and self._has_los(other.pos, env):
+                    best, best_d = other, d
+        return best
 
     def _sense_danger(self, env, smoke, fire):
         """Detect smoke/fire within 1 cell."""
