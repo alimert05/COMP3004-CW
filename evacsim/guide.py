@@ -414,7 +414,12 @@ class Guide:
 
         if dist > 0:
             direction = diff / dist
-            self.vel = direction * self.speed
+            # Slow down when carrying a group (pace with civilians)
+            if has_group:
+                move_speed = self.speed * 0.75  # ~1.5 — close to civilian speed
+            else:
+                move_speed = self.speed
+            self.vel = direction * move_speed
 
         # Move
         vx, vy = self.vel
@@ -733,20 +738,24 @@ class SweeperGuide(Guide):
         self._patrol_route = _balanced_patrol_order(self.pos, all_pts)
         self._patrol_idx = 0
 
+        # Track cleared rooms — skip them until full cycle completes
+        self._cleared_points = set()
+        self._cycle_start_idx = 0  # Where this patrol cycle started
+
         self._waypoints = []
         self._phase = self.COLLECTING
 
         # Wait at each patrol point to collect civilians
-        self._wait_ticks = 20
+        self._wait_ticks = 15  # Quick check — civilians spot exits themselves now
         self._wait_counter = 0
         self._waiting = False
 
         # Target exit for escorting
         self._escort_exit = None
 
-        # Releasing: wait at exit for stragglers
+        # Releasing: wait at exit for stragglers (shorter — civilians self-release at exits)
         self._release_wait = 0
-        self._release_max_wait = 60  # Max 60 ticks (2 seconds) at exit
+        self._release_max_wait = 30
 
         # Start patrol
         if self._patrol_route:
@@ -804,8 +813,12 @@ class SweeperGuide(Guide):
             self._wait_counter += 1
             if self._wait_counter >= self._wait_ticks:
                 self._waiting = False
+                recruitable = self._count_recruitable(env, smoke, civilians)
+                if recruitable == 0:
+                    # Nobody here — mark this point as cleared
+                    self._cleared_points.add(self._patrol_idx)
                 if self._group:
-                    if self._count_recruitable(env, smoke, civilians) == 0:
+                    if recruitable == 0:
                         self._start_escort(env)
                         return
                 self._advance_patrol(env)
@@ -819,12 +832,13 @@ class SweeperGuide(Guide):
             self._follow_path(env)
 
     def _do_escorting(self, env, smoke, civilians):
-        """Lead group to exit. If everyone died, abort and go back to patrol."""
+        """Lead group to exit. Pick up anyone on the way (no limit during escort)."""
         if not self._group:
-            # Everyone died or escaped — no point going to exit
             self._phase = self.RETURNING
             self._advance_patrol(env)
             return
+        # Pick up anyone we pass — no group limit during escort
+        self._recruit_nearby_escort(env, smoke, civilians)
         if not self._waypoints:
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
@@ -933,6 +947,31 @@ class SweeperGuide(Guide):
                 civ.assigned_guide = self
                 civ.state = FOLLOWING_GUIDE
 
+    def _recruit_nearby_escort(self, env, smoke, civilians):
+        """Recruit anyone nearby during escort — NO group limit.
+        If you're leading people to the exit and pass more civilians, take them."""
+        radius = self.get_visual_recruit_radius(smoke)
+        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
+                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        for civ in civilians:
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius and self._has_line_of_sight(civ.pos, env):
+                if civ.state == IDLE:
+                    civ.state = REACTING
+                    civ._reaction_counter = 0
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                elif civ.state == REACTING:
+                    civ._reaction_delay = min(civ._reaction_delay, 5)
+                    continue
+                else:
+                    self._group.append(civ)
+                    civ.assigned_guide = self
+                    civ.state = FOLLOWING_GUIDE
+
     def _count_recruitable(self, env, smoke, civilians):
         """Count recruitable civilians nearby."""
         radius = self.get_broadcast_radius(smoke)
@@ -1005,16 +1044,26 @@ class SweeperGuide(Guide):
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
     def _advance_patrol(self, env):
-        """Move to next patrol point. Skip points that are now in smoke/fire."""
+        """Move to next patrol point. Skip cleared and dangerous points."""
         if not self._patrol_route:
             return
 
         fg = getattr(self, '_fire_grid', None)
         sg = getattr(self, '_smoke_grid', None)
 
-        # Try up to len(route) points to find a safe one
+        # Try up to len(route) points to find a valid one
         for _ in range(len(self._patrol_route)):
             self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
+
+            # Full cycle completed? Reset cleared points (re-check everything)
+            if self._patrol_idx == self._cycle_start_idx:
+                self._cleared_points.clear()
+                self._cycle_start_idx = self._patrol_idx
+
+            # Skip cleared points (visited, nobody there)
+            if self._patrol_idx in self._cleared_points:
+                continue
+
             target = self._patrol_route[self._patrol_idx]
             tr, tc = env.world_to_grid(target[0], target[1])
 

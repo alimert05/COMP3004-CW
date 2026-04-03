@@ -143,10 +143,19 @@ class Civilian:
         speed = self._calc_speed(in_fire, in_smoke)
 
         # ── Opportunistic: spot exit (uses exit_vision — small signs, easy to miss) ──
-        if exit_vision > 0 and self.state not in (MOVING_TO_EXIT, FOLLOWING_GUIDE):
+        # FOLLOWING_GUIDE civilians CAN spot exits — if you see an exit door,
+        # you go through it. You don't wait for the guide to announce it.
+        if exit_vision > 0 and self.state not in (MOVING_TO_EXIT,):
             exit_pos = self._spot_exit(env, exit_vision)
             if exit_pos is not None:
-                self._set_exit_target(env, exit_pos)
+                # If in a guide's group, leave the group first
+                if self.state == FOLLOWING_GUIDE and self.assigned_guide is not None:
+                    try:
+                        self.assigned_guide._group.remove(self)
+                    except ValueError:
+                        pass
+                    self.assigned_guide = None
+                self._set_exit_target_force(env, exit_pos)
 
         # ── Rule 4: Herding — follow someone who knows the way ──
         if people_vision > 0 and self.state == WANDERING:
