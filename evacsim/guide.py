@@ -506,38 +506,37 @@ class BeaconGuide(Guide):
         return best
 
     def _find_beacon_position(self) -> np.ndarray:
-        """Find a walkable position 2-3 cells inward from the exit."""
+        """Stand 2 cells in front of the exit (into the building).
+        'In front' = the direction where FLOOR cells are (not walls)."""
         ex, ey = self.assigned_exit
         gr, gc = self.env.world_to_grid(ex, ey)
         rows, cols = self.env.grid.shape
 
-        visited = set()
-        queue = deque()
-        queue.append((gr, gc, 0))
-        visited.add((gr, gc))
+        # Find which direction is "inward" — check neighbors for FLOOR
+        inward_dr, inward_dc = 0, 0
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nr, nc = gr + dr, gc + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                if self.env.grid[nr, nc] == CellType.FLOOR:
+                    inward_dr, inward_dc = dr, dc
+                    break
 
-        best_pos = self.assigned_exit.copy()
-        best_dist = 0
+        # Step 2 cells inward
+        target_r = gr + inward_dr * 2
+        target_c = gc + inward_dc * 2
+        if (0 <= target_r < rows and 0 <= target_c < cols
+                and self.env.grid[target_r, target_c] != CellType.WALL):
+            return np.array(self.env.grid_to_world(target_r, target_c), dtype=float)
 
-        while queue:
-            r, c, d = queue.popleft()
-            if d > 4:
-                continue
+        # Try 1 cell inward
+        target_r = gr + inward_dr
+        target_c = gc + inward_dc
+        if (0 <= target_r < rows and 0 <= target_c < cols
+                and self.env.grid[target_r, target_c] != CellType.WALL):
+            return np.array(self.env.grid_to_world(target_r, target_c), dtype=float)
 
-            if 2 <= d <= 3 and self.env.grid[r, c] == CellType.FLOOR:
-                if d > best_dist:
-                    best_dist = d
-                    bx, by = self.env.grid_to_world(r, c)
-                    best_pos = np.array([bx, by])
-
-            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
-                    if self.env.grid[nr, nc] != CellType.WALL:
-                        visited.add((nr, nc))
-                        queue.append((nr, nc, d + 1))
-
-        return best_pos
+        # Fallback: stand at exit
+        return self.assigned_exit.copy()
 
     def update(
         self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
