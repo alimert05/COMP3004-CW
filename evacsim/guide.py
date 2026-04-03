@@ -459,38 +459,17 @@ class BeaconGuide(Guide):
       - Even in smoke (3-cell broadcast), much better than blind civilians
     """
 
-    def __init__(
-        self,
-        x: float,
-        y: float,
-        speed: float,
-        env: Environment,
-        rng: np.random.Generator,
-        assigned_exit: tuple = None,
-        beacon_pos: np.ndarray = None,
-    ):
+    def __init__(self, x: float, y: float, speed: float,
+                 env: Environment, rng: np.random.Generator,
+                 assigned_exit: tuple = None):
         super().__init__(x, y, speed, env, rng)
 
-        # Beacon position: territory center (from spawn) or near exit (fallback)
-        if beacon_pos is not None:
-            self._beacon_pos = beacon_pos
-            # Broadcast nearest exit to THIS position (not spawn position)
-            best, best_d = None, float("inf")
-            for ex, ey in self.known_exits:
-                d = np.hypot(beacon_pos[0] - ex, beacon_pos[1] - ey)
-                if d < best_d:
-                    best_d = d
-                    best = np.array([ex, ey], dtype=float)
-            self.assigned_exit = (
-                best if best is not None else np.array(self.known_exits[0], dtype=float)
-            )
+        if assigned_exit is not None:
+            self.assigned_exit = np.array(assigned_exit, dtype=float)
         else:
-            if assigned_exit is not None:
-                self.assigned_exit = np.array(assigned_exit, dtype=float)
-            else:
-                self.assigned_exit = self._find_nearest_exit()
-            self._beacon_pos = self._find_beacon_position()
+            self.assigned_exit = self._find_nearest_exit()
 
+        self._beacon_pos = self._find_beacon_position()
         self._waypoints = bfs_path(env, self.pos, self._beacon_pos)
         self._in_position = False
 
@@ -588,13 +567,17 @@ class BeaconGuide(Guide):
             # Distance factor: linear falloff (closer = easier to hear)
             distance_factor = 1.0 - (dist / max_range)
 
-            # Smoke factor: fire noise + smoke reduces hearing
-            # Smoke at CIVILIAN's position (they're the listener)
+            # Listener-side: smoke at civilian's position (irritation, disorientation)
             civ_smoke = smoke.get_density_at(civ.pos[0], civ.pos[1])
-            smoke_factor = max(0.3, 1.0 - civ_smoke * 0.5)
+            listener_factor = max(0.3, 1.0 - civ_smoke * 0.5)
+
+            # Source-side: smoke at guide's position (ambient noise from fire)
+            # Guide has mask so less affected, but noise still reduces effectiveness
+            guide_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
+            source_factor = max(0.5, 1.0 - guide_smoke * 0.3)
 
             # Final hearing probability this tick
-            hear_chance = distance_factor * smoke_factor
+            hear_chance = distance_factor * listener_factor * source_factor
 
             # Roll the dice
             if self._rng.random() > hear_chance:
