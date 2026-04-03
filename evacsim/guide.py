@@ -84,9 +84,9 @@ def bfs_path(env: Environment, start_world, goal_world, fire_grid=None):
         return result if result is not None else []
 
 
-def dijkstra_congestion_path(env, start_world, goal_world,
-                             fire_grid=None, smoke_grid=None,
-                             civilian_density=None):
+def dijkstra_congestion_path(
+    env, start_world, goal_world, fire_grid=None, smoke_grid=None, civilian_density=None
+):
     """Congestion-aware pathfinding using Dijkstra's algorithm.
     Inspired by Zhang et al. (2020) IEEE ICRA.
 
@@ -108,7 +108,7 @@ def dijkstra_congestion_path(env, start_world, goal_world,
         return []
 
     # Cost grid: infinity everywhere
-    cost = np.full((rows, cols), float('inf'))
+    cost = np.full((rows, cols), float("inf"))
     cost[sr, sc] = 0.0
     parent = {}
     parent[(sr, sc)] = None
@@ -176,6 +176,7 @@ def build_density_grid(env, civilians):
     """Build a 2D grid of civilian density per cell.
     Used by Router for congestion-aware pathfinding (Zhang et al. 2020)."""
     from evacsim.civilian import ESCAPED, DEAD
+
     grid = np.zeros(env.grid.shape, dtype=float)
     for civ in civilians:
         if civ.state in (ESCAPED, DEAD):
@@ -189,8 +190,14 @@ def build_density_grid(env, civilians):
 class Guide:
     """Base class for all guide types."""
 
-    def __init__(self, x: float, y: float, speed: float,
-                 env: Environment, rng: np.random.Generator):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        speed: float,
+        env: Environment,
+        rng: np.random.Generator,
+    ):
         self.pos = np.array([x, y], dtype=float)
         self.vel = np.array([0.0, 0.0])
         self.speed = speed
@@ -232,8 +239,9 @@ class Guide:
         # Worst of the two damage types determines health
         return max(0.0, 1.0 - max(fire_ratio, smoke_ratio))
 
-    def update(self, env: Environment, smoke: SmokeSystem,
-               fire: FireSystem, civilians: list) -> None:
+    def update(
+        self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
+    ) -> None:
         """Base update — handles damage and self-evacuation.
         Override in subclasses but call super().update() first."""
         if not self.alive:
@@ -253,7 +261,10 @@ class Guide:
             self._smoke_damage += local_smoke * 0.5  # Half damage vs civilians
 
         # Check for death
-        if self._fire_damage >= self._max_fire_damage or self._smoke_damage >= self._max_smoke_damage:
+        if (
+            self._fire_damage >= self._max_fire_damage
+            or self._smoke_damage >= self._max_smoke_damage
+        ):
             self.alive = False
             return
 
@@ -275,7 +286,7 @@ class Guide:
                 best_exit = np.array([ex, ey], dtype=float)
 
         if best_exit is not None:
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._escape_waypoints = bfs_path(env, self.pos, best_exit, fire_grid=fg)
 
     def _do_self_evacuation(self, env: Environment) -> bool:
@@ -364,10 +375,10 @@ class Guide:
             return
 
         # Check next 10 waypoints for fire or smoke
-        fg = getattr(self, '_fire_grid', None)
-        sg = getattr(self, '_smoke_grid', None)
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
         # Lower smoke threshold when carrying civilians (they're vulnerable)
-        has_group = hasattr(self, '_group') and len(self._group) > 0
+        has_group = hasattr(self, "_group") and len(self._group) > 0
         smoke_threshold = 0.3 if has_group else 0.6
 
         if fg is not None or sg is not None:
@@ -448,10 +459,16 @@ class BeaconGuide(Guide):
       - Even in smoke (3-cell broadcast), much better than blind civilians
     """
 
-    def __init__(self, x: float, y: float, speed: float,
-                 env: Environment, rng: np.random.Generator,
-                 assigned_exit: tuple = None,
-                 beacon_pos: np.ndarray = None):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        speed: float,
+        env: Environment,
+        rng: np.random.Generator,
+        assigned_exit: tuple = None,
+        beacon_pos: np.ndarray = None,
+    ):
         super().__init__(x, y, speed, env, rng)
 
         # Beacon position: territory center (from spawn) or near exit (fallback)
@@ -464,7 +481,9 @@ class BeaconGuide(Guide):
                 if d < best_d:
                     best_d = d
                     best = np.array([ex, ey], dtype=float)
-            self.assigned_exit = best if best is not None else np.array(self.known_exits[0], dtype=float)
+            self.assigned_exit = (
+                best if best is not None else np.array(self.known_exits[0], dtype=float)
+            )
         else:
             if assigned_exit is not None:
                 self.assigned_exit = np.array(assigned_exit, dtype=float)
@@ -522,8 +541,9 @@ class BeaconGuide(Guide):
 
         return best_pos
 
-    def update(self, env: Environment, smoke: SmokeSystem,
-               fire: FireSystem, civilians: list) -> None:
+    def update(
+        self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
+    ) -> None:
         """Move to beacon position via BFS path, then stand and broadcast."""
         super().update(env, smoke, fire, civilians)
         if not self.alive:
@@ -549,8 +569,14 @@ class BeaconGuide(Guide):
         # Based on acoustic propagation in fire conditions.
         max_range = self.broadcast_radius  # 100 units (10 cells / ~30m)
 
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+        )
 
         exit_pos = (self.assigned_exit[0], self.assigned_exit[1])
 
@@ -590,8 +616,9 @@ class BeaconGuide(Guide):
                 civ._set_exit_target(env, exit_pos)
 
 
-def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
-                        seed: int = 77) -> list[BeaconGuide]:
+def spawn_beacon_guides(
+    env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77
+) -> list[BeaconGuide]:
     """Spawn beacon guides spread across EXITS (not building interior).
 
     Beacons belong near exits — like firefighters with megaphones at exit doors.
@@ -636,8 +663,7 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
 
         if slot == 0:
             # First guide at this exit — standard position (2-3 cells from exit)
-            guide = BeaconGuide(ex, ey, speed, env, rng,
-                                assigned_exit=(ex, ey))
+            guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=(ex, ey))
         else:
             # Extra guide — find position 5-6 cells along corridor from exit
             # BFS from exit, find a walkable cell at depth 5-6 that's NOT
@@ -657,7 +683,10 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
                 r, c, d = q.popleft()
                 if d > target_depth + 3:
                     continue
-                if target_depth <= d <= target_depth + 2 and env.grid[r, c] != CellType.WALL:
+                if (
+                    target_depth <= d <= target_depth + 2
+                    and env.grid[r, c] != CellType.WALL
+                ):
                     # Prefer different direction from slot 0
                     if slot % 2 == 1:
                         direction_ok = r <= gr  # Go upward
@@ -676,8 +705,7 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
             if beacon_pos is not None:
                 guide = BeaconGuide(ex, ey, speed, env, rng, beacon_pos=beacon_pos)
             else:
-                guide = BeaconGuide(ex, ey, speed, env, rng,
-                                    assigned_exit=(ex, ey))
+                guide = BeaconGuide(ex, ey, speed, env, rng, assigned_exit=(ex, ey))
 
         guides.append(guide)
 
@@ -687,6 +715,7 @@ def spawn_beacon_guides(env: Environment, n_guides: int, speed: float = 2.0,
 # ════════════════════════════════════════════════════════════════════
 # SWEEPER GUIDE — collect-and-escort with boids
 # ════════════════════════════════════════════════════════════════════
+
 
 def _find_patrol_points(env: Environment):
     """Find patrol points using hybrid room detection + grid scan.
@@ -757,7 +786,7 @@ def _balanced_patrol_order(start_pos, waypoints):
 
     sy = start_pos[1]
     above = [p for p in waypoints if p[1] < sy - 5]  # Above start (lower y)
-    below = [p for p in waypoints if p[1] > sy + 5]   # Below start (higher y)
+    below = [p for p in waypoints if p[1] > sy + 5]  # Below start (higher y)
     middle = [p for p in waypoints if abs(p[1] - sy) <= 5]  # Near start
 
     def greedy_sort(pts, start):
@@ -765,8 +794,10 @@ def _balanced_patrol_order(start_pos, waypoints):
         ordered = []
         current = start.copy()
         while remaining:
-            best_idx = min(range(len(remaining)),
-                           key=lambda i: np.linalg.norm(current - remaining[i]))
+            best_idx = min(
+                range(len(remaining)),
+                key=lambda i: np.linalg.norm(current - remaining[i]),
+            )
             ordered.append(remaining.pop(best_idx))
             current = ordered[-1]
         return ordered
@@ -802,12 +833,19 @@ class SweeperGuide(Guide):
 
     COLLECTING = "collecting"
     ESCORTING = "escorting"
-    RELEASING = "releasing"   # Waiting at exit for group to arrive and escape
+    RELEASING = "releasing"  # Waiting at exit for group to arrive and escape
     RETURNING = "returning"
 
-    def __init__(self, x: float, y: float, speed: float,
-                 env: Environment, rng: np.random.Generator,
-                 patrol_points: list = None, max_group: int = 8):
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        speed: float,
+        env: Environment,
+        rng: np.random.Generator,
+        patrol_points: list = None,
+        max_group: int = 19,  # Tuned via parameter sweep (4500 runs, sizes 1-25)
+    ):
         super().__init__(x, y, speed, env, rng)
 
         self._group = []
@@ -841,8 +879,9 @@ class SweeperGuide(Guide):
         if self._patrol_route:
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
 
-    def update(self, env: Environment, smoke: SmokeSystem,
-               fire: FireSystem, civilians: list) -> None:
+    def update(
+        self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
+    ) -> None:
         super().update(env, smoke, fire, civilians)
         if not self.alive:
             self._release_group_no_exit()
@@ -877,8 +916,8 @@ class SweeperGuide(Guide):
         # DANGER CHECK: proactive detection — check guide surroundings + group members
         if self._group:
             danger = False
-            sg = getattr(self, '_smoke_grid', None)
-            fg = getattr(self, '_fire_grid', None)
+            sg = getattr(self, "_smoke_grid", None)
+            fg = getattr(self, "_fire_grid", None)
             rows, cols = env.grid.shape
 
             # Check 2-cell radius around guide (proactive — detect approaching smoke)
@@ -915,10 +954,14 @@ class SweeperGuide(Guide):
                 if recruitable == 0:
                     # Nobody here — mark this point as cleared
                     self._cleared_points.add(self._patrol_idx)
-                if self._group:
-                    if recruitable == 0:
+                if self._group and recruitable == 0:
+                    # Nobody else here. Escort or keep collecting?
+                    # Only escort if group has decent size (5+).
+                    # Otherwise continue to next patrol point — collect more.
+                    if len(self._group) >= 5:
                         self._start_escort(env)
                         return
+                    # Small group — keep them, move to next point
                 self._advance_patrol(env)
             return
 
@@ -988,7 +1031,7 @@ class SweeperGuide(Guide):
                     break
             # Check guide surroundings (2-cell radius)
             if not danger:
-                sg = getattr(self, '_smoke_grid', None)
+                sg = getattr(self, "_smoke_grid", None)
                 if sg is not None:
                     gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
                     rows, cols = sg.shape
@@ -1022,8 +1065,14 @@ class SweeperGuide(Guide):
             return
         radius = self.get_visual_recruit_radius(smoke)
 
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+        )
 
         for civ in civilians:
             if len(self._group) >= self._max_group:
@@ -1054,8 +1103,15 @@ class SweeperGuide(Guide):
         """Recruit anyone nearby during escort — NO group limit.
         If you're leading people to the exit and pass more civilians, take them."""
         radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+        )
+
         for civ in civilians:
             if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
@@ -1079,8 +1135,14 @@ class SweeperGuide(Guide):
         """Count civilians that can ACTUALLY be recruited (visual range + LOS).
         Must match what _recruit_nearby can reach — no false positives."""
         radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            FOLLOWING_GUIDE,
+        )
+
         count = 0
         for civ in civilians:
             if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
@@ -1096,7 +1158,7 @@ class SweeperGuide(Guide):
         """Begin leading group to nearest SAFE exit.
         Avoids exits that are in or near fire."""
         self._phase = self.ESCORTING
-        fg = getattr(self, '_fire_grid', None)
+        fg = getattr(self, "_fire_grid", None)
 
         best_exit, best_score = None, float("inf")
         for ex, ey in self.known_exits:
@@ -1107,7 +1169,7 @@ class SweeperGuide(Guide):
                 er, ec = env.world_to_grid(ex, ey)
                 if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
                     danger_penalty += fg[er, ec] * 500.0
-            sg = getattr(self, '_smoke_grid', None)
+            sg = getattr(self, "_smoke_grid", None)
             if sg is not None:
                 er, ec = env.world_to_grid(ex, ey)
                 if 0 <= er < sg.shape[0] and 0 <= ec < sg.shape[1]:
@@ -1121,7 +1183,7 @@ class SweeperGuide(Guide):
         if best_exit:
             # Escorting group — smoke is full danger (civilians vulnerable)
             # Must match _follow_path's reroute weight (sg * 1.0 when has_group)
-            sg = getattr(self, '_smoke_grid', None)
+            sg = getattr(self, "_smoke_grid", None)
             if fg is not None and sg is not None:
                 danger = np.maximum(fg, sg * 1.0)
             elif fg is not None:
@@ -1130,7 +1192,9 @@ class SweeperGuide(Guide):
                 danger = sg * 1.0
             else:
                 danger = None
-            self._waypoints = bfs_path(env, self.pos, np.array(best_exit), fire_grid=danger)
+            self._waypoints = bfs_path(
+                env, self.pos, np.array(best_exit), fire_grid=danger
+            )
 
     # _release_group_at_exit removed — replaced by _do_releasing phase
     # Guide now waits at exit and releases civilians one by one as they arrive
@@ -1138,6 +1202,7 @@ class SweeperGuide(Guide):
     def _release_group_no_exit(self):
         """Release group without exit info (guide died/evacuating)."""
         from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
+
         for civ in self._group:
             if civ.state == FOLLOWING_GUIDE:
                 civ.assigned_guide = None
@@ -1147,6 +1212,7 @@ class SweeperGuide(Guide):
     def _clean_group(self):
         """Remove dead/escaped civilians from group."""
         from evacsim.civilian import ESCAPED, DEAD
+
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
     def _advance_patrol(self, env):
@@ -1154,8 +1220,8 @@ class SweeperGuide(Guide):
         if not self._patrol_route:
             return
 
-        fg = getattr(self, '_fire_grid', None)
-        sg = getattr(self, '_smoke_grid', None)
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
 
         # Try up to len(route) points to find a valid one
         for _ in range(len(self._patrol_route)):
@@ -1195,13 +1261,18 @@ class SweeperGuide(Guide):
                 danger = sg * 0.5
             else:
                 danger = None
-            self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger)
+            self._waypoints = bfs_path(
+                env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger
+            )
         else:
-            self._waypoints = bfs_path(env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg)
+            self._waypoints = bfs_path(
+                env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg
+            )
 
 
-def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
-                         seed: int = 77) -> list[SweeperGuide]:
+def spawn_sweeper_guides(
+    env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77
+) -> list[SweeperGuide]:
     """Spawn sweeper guides from exits. Each covers a different territory.
 
     Splits patrol points geographically so guides don't overlap:
@@ -1261,6 +1332,7 @@ def spawn_sweeper_guides(env: Environment, n_guides: int, speed: float = 2.0,
 # ════════════════════════════════════════════════════════════════════
 # CONGESTION-AWARE ROUTER — corridor junction controller
 # ════════════════════════════════════════════════════════════════════
+
 
 def _find_junctions(env: Environment):
     """Find corridor junction cells — cells where 3+ cardinal directions
@@ -1387,8 +1459,8 @@ class RouterGuide(Guide):
 
     def _find_territory_center(self, env):
         min_r, max_r, min_c, max_c = self._territory
-        cr = max(0, min(env.grid.shape[0]-1, (min_r + max_r) // 2))
-        cc = max(0, min(env.grid.shape[1]-1, (min_c + max_c) // 2))
+        cr = max(0, min(env.grid.shape[0] - 1, (min_r + max_r) // 2))
+        cc = max(0, min(env.grid.shape[1] - 1, (min_c + max_c) // 2))
         if env.grid[cr, cc] != CellType.WALL:
             return np.array(env.grid_to_world(cr, cc), dtype=float)
         visited = {(cr, cc)}
@@ -1398,11 +1470,11 @@ class RouterGuide(Guide):
             r, c = q.popleft()
             if env.grid[r, c] != CellType.WALL:
                 return np.array(env.grid_to_world(r, c), dtype=float)
-            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
-                nr, nc = r+dr, c+dc
-                if 0<=nr<rows and 0<=nc<cols and (nr,nc) not in visited:
-                    visited.add((nr,nc))
-                    q.append((nr,nc))
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
+                    visited.add((nr, nc))
+                    q.append((nr, nc))
         return np.array(env.grid_to_world(cr, cc), dtype=float)
 
     def update(self, env, smoke, fire, civilians):
@@ -1453,7 +1525,7 @@ class RouterGuide(Guide):
         # Scan every eval_interval ticks (not just on counter==0)
         hotspot = self._find_hotspot(env, smoke, civilians)
         if hotspot is not None:
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=fg)
             self._phase = self.RESPONDING
         elif self._group:
@@ -1486,7 +1558,7 @@ class RouterGuide(Guide):
                 self._start_escort(env, smoke, civilians)
             else:
                 self._phase = self.RETURNING
-                fg = getattr(self, '_fire_grid', None)
+                fg = getattr(self, "_fire_grid", None)
                 self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=fg)
 
     def _do_escorting(self, env, smoke, civilians):
@@ -1495,7 +1567,7 @@ class RouterGuide(Guide):
         if not self._group:
             # Everyone died — abort escort, go back to scanning
             self._phase = self.RETURNING
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._waypoints = bfs_path(self.env, self.pos, self._home_pos, fire_grid=fg)
             return
         self._recruit_nearby_unlimited(env, smoke, civilians)
@@ -1514,6 +1586,7 @@ class RouterGuide(Guide):
     def _do_releasing(self, env):
         """Wait at exit for group to arrive and escape."""
         from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
+
         self.vel = np.zeros(2)
         self._release_wait += 1
 
@@ -1523,7 +1596,10 @@ class RouterGuide(Guide):
                 continue
             dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
             dist_guide = np.linalg.norm(civ.pos - self.pos)
-            if dist_exit < self.env.cell_size * 5 or dist_guide < self.env.cell_size * 3:
+            if (
+                dist_exit < self.env.cell_size * 5
+                or dist_guide < self.env.cell_size * 3
+            ):
                 civ._set_exit_target_force(self.env, self._escort_exit)
             else:
                 still.append(civ)
@@ -1536,7 +1612,7 @@ class RouterGuide(Guide):
                     civ.state = WANDERING
             self._group.clear()
             self._phase = self.RETURNING
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._waypoints = bfs_path(self.env, self.pos, self._home_pos, fire_grid=fg)
 
     def _do_returning(self, env, smoke=None, civilians=None):
@@ -1559,17 +1635,18 @@ class RouterGuide(Guide):
         Router's intelligence: go where you can help the MOST people.
         Sweeper follows a fixed route. Router goes where the need is greatest."""
         from evacsim.civilian import ESCAPED, DEAD, IDLE, REACTING
+
         rows, cols = env.grid.shape
         min_r, max_r, min_c, max_c = self._territory
-        fg = getattr(self, '_fire_grid', None)
-        sg = getattr(self, '_smoke_grid', None)
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
         region = 5
         best_pos, best_n = None, 1  # Need 2+ civilians
 
         for rr in range(min_r, min(max_r, rows), region):
             for rc in range(min_c, min(max_c, cols), region):
-                cr = min(rr + region//2, rows-1)
-                cc = min(rc + region//2, cols-1)
+                cr = min(rr + region // 2, rows - 1)
+                cc = min(rc + region // 2, cols - 1)
                 if fg is not None and fg[cr, cc] > 0.2:
                     continue
                 if sg is not None and sg[cr, cc] > 0.5:
@@ -1581,19 +1658,25 @@ class RouterGuide(Guide):
                     if civ.assigned_guide is not None:
                         continue
                     r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
-                    if rr <= r < rr+region and rc <= c < rc+region:
-                        n += 1; sx += civ.pos[0]; sy += civ.pos[1]
+                    if rr <= r < rr + region and rc <= c < rc + region:
+                        n += 1
+                        sx += civ.pos[0]
+                        sy += civ.pos[1]
                 if n > best_n:
                     best_n = n
-                    best_pos = np.array([sx/n, sy/n])
+                    best_pos = np.array([sx / n, sy / n])
 
         if best_pos is not None:
             gr, gc = env.world_to_grid(best_pos[0], best_pos[1])
             if env.grid[gr, gc] == CellType.WALL:
                 for dr in range(-2, 3):
                     for dc in range(-2, 3):
-                        nr, nc = gr+dr, gc+dc
-                        if 0<=nr<rows and 0<=nc<cols and env.grid[nr,nc]!=CellType.WALL:
+                        nr, nc = gr + dr, gc + dc
+                        if (
+                            0 <= nr < rows
+                            and 0 <= nc < cols
+                            and env.grid[nr, nc] != CellType.WALL
+                        ):
                             return np.array(env.grid_to_world(nr, nc), dtype=float)
                 return None
         return best_pos
@@ -1603,8 +1686,15 @@ class RouterGuide(Guide):
         if len(self._group) >= self._max_group:
             return
         radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+        )
+
         for civ in civilians:
             if len(self._group) >= self._max_group:
                 break
@@ -1625,14 +1715,22 @@ class RouterGuide(Guide):
                     self._group.append(civ)
                     civ.assigned_guide = self
                     from evacsim.civilian import FOLLOWING_GUIDE
+
                     civ.state = FOLLOWING_GUIDE
 
     def _recruit_nearby_unlimited(self, env, smoke, civilians):
         """Recruit ANY nearby civilian while escorting — no group limit.
         Uses Jin (1978) visual range + LOS. Picks up everyone on the way."""
         radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+        )
+
         for civ in civilians:
             if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
@@ -1656,8 +1754,8 @@ class RouterGuide(Guide):
         """Find LEAST CONGESTED exit using density-aware scoring, then
         use congestion-aware Dijkstra to plan the path."""
         self._phase = self.ESCORTING
-        fg = getattr(self, '_fire_grid', None)
-        sg = getattr(self, '_smoke_grid', None)
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
 
         # Score each exit: distance + congestion + smoke
         best_exit, best_score = None, float("inf")
@@ -1668,7 +1766,7 @@ class RouterGuide(Guide):
             fire_pen = 0
             if fg is not None:
                 er, ec = env.world_to_grid(ex, ey)
-                if 0<=er<fg.shape[0] and 0<=ec<fg.shape[1]:
+                if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
                     fire_pen = fg[er, ec] * 500.0
             score = dist + congestion + smoke_pen + fire_pen
             if score < best_score:
@@ -1679,12 +1777,17 @@ class RouterGuide(Guide):
         if best_exit:
             # Use congestion-aware Dijkstra (Zhang et al. 2020)
             self._waypoints = dijkstra_congestion_path(
-                env, self.pos, np.array(best_exit),
-                fire_grid=fg, smoke_grid=sg,
-                civilian_density=self._density_grid)
+                env,
+                self.pos,
+                np.array(best_exit),
+                fire_grid=fg,
+                smoke_grid=sg,
+                civilian_density=self._density_grid,
+            )
 
     def _update_exit_counts(self, civilians):
         from evacsim.civilian import MOVING_TO_EXIT, QUEUED
+
         self._exit_counts = {(ex, ey): 0 for ex, ey in self.known_exits}
         for civ in civilians:
             if civ.state not in (MOVING_TO_EXIT, QUEUED) or civ._target_exit is None:
@@ -1692,17 +1795,26 @@ class RouterGuide(Guide):
             tx, ty = civ._target_exit
             best, best_d = None, float("inf")
             for ex, ey in self.known_exits:
-                d = np.hypot(tx-ex, ty-ey)
+                d = np.hypot(tx - ex, ty - ey)
                 if d < best_d:
-                    best_d = d; best = (ex, ey)
+                    best_d = d
+                    best = (ex, ey)
             if best and best_d < 20:
                 self._exit_counts[best] += 1
 
     def _broadcast_redirect(self, env, smoke, civilians):
         """Broadcast optimal exit. Redirect civilians heading to congested exit."""
         radius = self.get_broadcast_radius(smoke)
-        from evacsim.civilian import (MOVING_TO_EXIT, ESCAPED, DEAD,
-                                       IDLE, REACTING, FOLLOWING_GUIDE, QUEUED)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            IDLE,
+            REACTING,
+            FOLLOWING_GUIDE,
+            QUEUED,
+        )
+
         for civ in civilians:
             if civ.state in (ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
@@ -1723,8 +1835,14 @@ class RouterGuide(Guide):
             elif civ.state in (MOVING_TO_EXIT, QUEUED):
                 if civ._target_exit is not None:
                     cur = civ._target_exit
-                    cur_s = np.hypot(civ.pos[0]-cur[0], civ.pos[1]-cur[1]) + self._exit_counts.get((cur[0],cur[1]),0)*30
-                    opt_s = np.hypot(civ.pos[0]-optimal[0], civ.pos[1]-optimal[1]) + self._exit_counts.get(optimal,0)*30
+                    cur_s = (
+                        np.hypot(civ.pos[0] - cur[0], civ.pos[1] - cur[1])
+                        + self._exit_counts.get((cur[0], cur[1]), 0) * 30
+                    )
+                    opt_s = (
+                        np.hypot(civ.pos[0] - optimal[0], civ.pos[1] - optimal[1])
+                        + self._exit_counts.get(optimal, 0) * 30
+                    )
                     if opt_s < cur_s * 0.75:
                         civ._set_exit_target_force(env, optimal)
             else:
@@ -1733,13 +1851,19 @@ class RouterGuide(Guide):
     def _best_exit_for(self, civ_pos, smoke):
         best, best_s = None, float("inf")
         for ex, ey in self.known_exits:
-            s = np.hypot(civ_pos[0]-ex, civ_pos[1]-ey) + self._exit_counts.get((ex,ey),0)*30 + smoke.get_density_at(ex,ey)*100
+            s = (
+                np.hypot(civ_pos[0] - ex, civ_pos[1] - ey)
+                + self._exit_counts.get((ex, ey), 0) * 30
+                + smoke.get_density_at(ex, ey) * 100
+            )
             if s < best_s:
-                best_s = s; best = (ex, ey)
+                best_s = s
+                best = (ex, ey)
         return best
 
     def _release_group_wandering(self):
         from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
+
         for civ in self._group:
             if civ.state == FOLLOWING_GUIDE:
                 civ.assigned_guide = None
@@ -1748,6 +1872,7 @@ class RouterGuide(Guide):
 
     def _clean_group(self):
         from evacsim.civilian import ESCAPED, DEAD
+
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
 
@@ -1764,12 +1889,19 @@ def spawn_router_guides(env, n_guides, speed=2.0, seed=77):
         territories = [(0, mid_r, 0, cols), (mid_r, rows, 0, cols)]
     elif n_guides <= 4:
         territories = [
-            (0, mid_r, 0, mid_c), (0, mid_r, mid_c, cols),
-            (mid_r, rows, 0, mid_c), (mid_r, rows, mid_c, cols)]
+            (0, mid_r, 0, mid_c),
+            (0, mid_r, mid_c, cols),
+            (mid_r, rows, 0, mid_c),
+            (mid_r, rows, mid_c, cols),
+        ]
     else:
-        base = [(0,mid_r,0,mid_c),(0,mid_r,mid_c,cols),
-                (mid_r,rows,0,mid_c),(mid_r,rows,mid_c,cols)]
-        territories = [base[i%4] for i in range(n_guides)]
+        base = [
+            (0, mid_r, 0, mid_c),
+            (0, mid_r, mid_c, cols),
+            (mid_r, rows, 0, mid_c),
+            (mid_r, rows, mid_c, cols),
+        ]
+        territories = [base[i % 4] for i in range(n_guides)]
 
     guides = []
     for i in range(n_guides):
