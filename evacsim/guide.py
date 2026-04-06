@@ -172,6 +172,88 @@ def dijkstra_congestion_path(
     return []  # No path found
 
 
+def dbscan_cluster(points, epsilon, min_points):
+    """DBSCAN spatial clustering (Ester et al., 1996).
+
+    Finds clusters of arbitrary shape without needing to know the number
+    of clusters in advance. Used by Router to identify civilian groups
+    that need assistance.
+
+    Parameters:
+        points: list of np.array positions (world coordinates)
+        epsilon: neighbourhood radius — points within this distance are neighbours.
+                 Set to guide visual range (justified by Jin 1978).
+        min_points: minimum neighbours to form a core point.
+                    Clusters smaller than this are noise.
+
+    Returns:
+        List of clusters, each cluster = list of indices into `points`.
+        Empty list if no clusters found. Noise points are excluded.
+    """
+    n = len(points)
+    if n == 0:
+        return []
+
+    UNVISITED = -1
+    NOISE = -2
+    labels = [UNVISITED] * n
+    cluster_id = 0
+
+    # Precompute squared distances (avoid sqrt for performance)
+    eps_sq = epsilon * epsilon
+
+    def range_query(idx):
+        """Find all points within epsilon of point idx."""
+        px, py = points[idx][0], points[idx][1]
+        neighbors = []
+        for j in range(n):
+            dx = px - points[j][0]
+            dy = py - points[j][1]
+            if dx * dx + dy * dy <= eps_sq:
+                neighbors.append(j)
+        return neighbors
+
+    for i in range(n):
+        if labels[i] != UNVISITED:
+            continue
+
+        neighbors = range_query(i)
+
+        if len(neighbors) < min_points:
+            labels[i] = NOISE
+            continue
+
+        # Start new cluster
+        labels[i] = cluster_id
+        seed_set = set(neighbors) - {i}
+        processed = {i}
+
+        while seed_set:
+            q = seed_set.pop()
+            if labels[q] == NOISE:
+                labels[q] = cluster_id  # Border point joins cluster
+            if labels[q] != UNVISITED:
+                processed.add(q)
+                continue
+            labels[q] = cluster_id
+            processed.add(q)
+
+            q_neighbors = range_query(q)
+            if len(q_neighbors) >= min_points:
+                # q is a core point — expand cluster with its neighbours
+                seed_set.update(set(q_neighbors) - processed)
+
+        cluster_id += 1
+
+    # Group point indices by cluster ID
+    clusters = {}
+    for i, label in enumerate(labels):
+        if label >= 0:
+            clusters.setdefault(label, []).append(i)
+
+    return list(clusters.values())
+
+
 def build_density_grid(env, civilians):
     """Build a 2D grid of civilian density per cell with 3x3 blur.
     Used by Router for congestion-aware Dijkstra pathfinding (Zhang et al. 2020).
@@ -1835,9 +1917,13 @@ class RouterGuide(Guide):
                 self._start_escort(env, smoke, civilians)
                 return
 
-        # Scan for hotspots while walking home.
-        # If found, pivot directly — skip the walk home.
-        hotspot = self._find_hotspot(env, smoke, civilians)
+        # Scan for hotspots periodically while walking home (throttled —
+        # DBSCAN is O(n²), don't run every tick). eval_counter resets every
+        # eval_interval ticks in update(), so this fires every ~20 ticks.
+        if self._eval_counter == 0:
+            hotspot = self._find_hotspot(env, smoke, civilians)
+        else:
+            hotspot = None
         if hotspot is not None:
             fg = getattr(self, "_fire_grid", None)
             sg = getattr(self, "_smoke_grid", None)
@@ -1860,67 +1946,100 @@ class RouterGuide(Guide):
     # ── Intelligence methods ──
 
     def _find_hotspot(self, env, smoke, civilians):
-        """Find the area with MOST civilians needing help in territory.
+        """Find the highest-priority civilian cluster using DBSCAN (Ester et al., 1996).
 
-        Router's intelligence: go where you can help the MOST people.
-        Sweeper follows a fixed patrol route. Router REACTS to where need is greatest.
+        Router's core intelligence: uses density-based spatial clustering to
+        identify groups of civilians that need help. Unlike grid-based scanning,
+        DBSCAN finds natural clusters of arbitrary shape without boundary artifacts.
 
-        Counts ALL unhelped civilians including IDLE (who most need waking up).
-        Weights civilians in smoke higher (they're in more danger).
-        Skips regions that are on fire or in heavy smoke (unsafe for guide)."""
+        Parameters:
+            epsilon = cell_size * 5 (~15m at 3m/cell): civilians within 5 cells
+                      of each other are considered part of the same cluster.
+                      Justified by typical room dimensions.
+            min_points = 3: need at least 3 civilians to form a cluster.
+                      Isolated individuals/pairs are noise (not worth a trip).
+
+        Cluster scoring: urgency-weighted (civilians in smoke score higher).
+        Skips clusters whose centroid is in fire or smoke (unsafe to reach)."""
         from evacsim.civilian import ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED
 
-        rows, cols = env.grid.shape
+        # 1. Filter to civilians needing help, within this guide's territory
         min_r, max_r, min_c, max_c = self._territory
+        candidates = []
+        for civ in civilians:
+            if civ.state in (ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            # Territory check
+            r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
+            if min_r <= r < max_r and min_c <= c < max_c:
+                candidates.append(civ)
+
+        if len(candidates) < 3:
+            return None
+
+        # 2. Run DBSCAN clustering
+        positions = [c.pos for c in candidates]
+        epsilon = env.cell_size * 3  # 3 cells (~9m) — room-sized, prevents corridor chaining
+        clusters = dbscan_cluster(positions, epsilon, min_points=3)
+
+        if not clusters:
+            return None
+
+        # 3. Score each cluster and pick the best one
         fg = getattr(self, "_fire_grid", None)
         sg = getattr(self, "_smoke_grid", None)
-        region = 5
-        best_pos, best_score = None, 1  # Need score > 1 to trigger
-        # Lower smoke threshold when carrying civilians (they're vulnerable)
         smoke_limit = 0.3 if self._group else 0.6
+        rows, cols = env.grid.shape
 
-        for rr in range(min_r, min(max_r, rows), region):
-            for rc in range(min_c, min(max_c, cols), region):
-                cr = min(rr + region // 2, rows - 1)
-                cc = min(rc + region // 2, cols - 1)
-                # Skip regions on fire (too dangerous)
-                if fg is not None and fg[cr, cc] > 0.2:
-                    continue
-                # Skip smoky regions (lower threshold when carrying group)
-                if sg is not None and sg[cr, cc] > smoke_limit:
-                    continue
-                score, n, sx, sy = 0.0, 0, 0.0, 0.0
-                for civ in civilians:
-                    # Skip civilians who don't need help
-                    if civ.state in (ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED):
-                        continue
-                    if civ.assigned_guide is not None:
-                        continue
-                    r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
-                    if rr <= r < rr + region and rc <= c < rc + region:
-                        n += 1
-                        sx += civ.pos[0]
-                        sy += civ.pos[1]
-                        # Weight by urgency: civilians in smoke need help more
-                        civ_smoke = smoke.get_density_at(civ.pos[0], civ.pos[1])
-                        score += 1.0 + civ_smoke * 2.0  # Base 1 + up to 2 extra for smoke
-                if score > best_score:
-                    best_score = score
-                    best_pos = np.array([sx / n, sy / n])
+        best_pos = None
+        best_score = 0
 
-        if best_pos is not None:
-            gr, gc = env.world_to_grid(best_pos[0], best_pos[1])
-            if env.grid[gr, gc] == CellType.WALL:
-                for dr in range(-2, 3):
-                    for dc in range(-2, 3):
-                        nr, nc = gr + dr, gc + dc
-                        if (
-                            0 <= nr < rows
-                            and 0 <= nc < cols
-                            and env.grid[nr, nc] != CellType.WALL
-                        ):
-                            return np.array(env.grid_to_world(nr, nc), dtype=float)
-                return None
+        for cluster_indices in clusters:
+            # Compute centroid
+            cx = sum(positions[i][0] for i in cluster_indices) / len(cluster_indices)
+            cy = sum(positions[i][1] for i in cluster_indices) / len(cluster_indices)
+
+            # Safety check: is centroid reachable (not in fire/heavy smoke)?
+            cr, cc = env.world_to_grid(cx, cy)
+            if not (0 <= cr < rows and 0 <= cc < cols):
+                continue
+            if fg is not None and fg[cr, cc] > 0.2:
+                continue
+            if sg is not None and sg[cr, cc] > smoke_limit:
+                continue
+
+            # Score: cluster size, penalised by smoke at centroid.
+            # Bigger clusters = more people to save = higher priority.
+            # Smoke at centroid = harder to reach safely = lower priority.
+            # This avoids the perverse incentive of prioritising clusters
+            # IN smoke (which are dangerous to reach).
+            size = len(cluster_indices)
+            centroid_smoke = smoke.get_density_at(cx, cy) if smoke else 0
+            score = size * (1.0 - centroid_smoke * 0.5)  # Smoke reduces score by up to 50%
+
+            if score > best_score:
+                best_score = score
+                best_pos = np.array([cx, cy])
+
+        if best_pos is None:
+            return None
+
+        # 4. Snap centroid to nearest walkable cell if it's in a wall
+        gr, gc = env.world_to_grid(best_pos[0], best_pos[1])
+        if env.grid[gr, gc] == CellType.WALL:
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = gr + dr, gc + dc
+                    if (
+                        0 <= nr < rows
+                        and 0 <= nc < cols
+                        and env.grid[nr, nc] != CellType.WALL
+                    ):
+                        return np.array(env.grid_to_world(nr, nc), dtype=float)
+            return None
+
         return best_pos
 
     def _recruit_nearby(self, env, smoke, civilians):
