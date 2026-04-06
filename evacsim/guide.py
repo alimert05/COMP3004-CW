@@ -172,6 +172,43 @@ def dijkstra_congestion_path(
     return []  # No path found
 
 
+def predict_spread(density, spreadable_mask, source_cells, spread_rate, steps):
+    """Simulate cellular automaton fire/smoke spread forward N steps.
+
+    Used by Router for deliberative planning: predicts where fire/smoke
+    WILL be when the escort group arrives, not just where it IS now.
+    This enables proactive route planning that avoids corridors predicted
+    to become dangerous during transit.
+
+    Uses mean noise (1.0) instead of stochastic noise for deterministic
+    prediction. This provides the expected-value approximation of the
+    CA's stochastic evolution.
+
+    Parameters:
+        density: current fire/smoke density grid (2D numpy array)
+        spreadable_mask: boolean grid (True = can spread here)
+        source_cells: list of (row, col) fire source positions
+        spread_rate: CA spread rate (0.005 for fire, 0.02 for smoke)
+        steps: number of ticks to predict forward
+
+    Returns:
+        Predicted density grid (does NOT modify the original).
+    """
+    d = density.copy()
+    for _ in range(steps):
+        padded = np.pad(d, 1, mode="constant", constant_values=0.0)
+        max_neighbour = np.maximum(
+            np.maximum(padded[0:-2, 1:-1], padded[2:, 1:-1]),
+            np.maximum(padded[1:-1, 0:-2], padded[1:-1, 2:]),
+        )
+        # Deterministic: no random noise (use expected value 1.0)
+        delta = spread_rate * np.maximum(0.0, max_neighbour - d)
+        d = np.where(spreadable_mask, np.minimum(1.0, d + delta), 0.0)
+        for r, c in source_cells:
+            d[r, c] = 1.0
+    return d
+
+
 def dbscan_cluster(points, epsilon, min_points):
     """DBSCAN spatial clustering (Ester et al., 1996).
 
@@ -1483,6 +1520,10 @@ class RouterGuide(Guide):
             self._release_group_wandering()
             return
 
+        # Store references for deliberative planning (fire spread prediction)
+        self._fire_system = fire
+        self._smoke_system = smoke
+
         self._tick += 1
 
         # Update density + congestion data
@@ -2189,23 +2230,58 @@ class RouterGuide(Guide):
         return count
 
     def _start_escort(self, env, smoke, civilians):
-        """Find LEAST CONGESTED exit using density-aware scoring, then
-        use congestion-aware Dijkstra to plan the path."""
+        """Deliberative escort planning: predict fire/smoke spread, then route.
+
+        Hybrid reactive-deliberative architecture:
+          - REACTIVE: uses current congestion data for exit selection
+          - DELIBERATIVE: simulates fire/smoke CA forward to predict future
+            danger, then plans path through corridors that will STILL be safe
+            when the group passes through (not just safe NOW).
+
+        This avoids the common failure mode where a corridor is clear when
+        the escort starts but fills with smoke by the time the group arrives.
+        """
         self._phase = self.ESCORTING
         fg = getattr(self, "_fire_grid", None)
         sg = getattr(self, "_smoke_grid", None)
 
-        # Score each exit: distance + congestion + smoke
+        # ── DELIBERATIVE: predict fire/smoke spread ──
+        # Estimate escort duration from straight-line distance
+        # Use predicted danger for both exit scoring and path planning
+        fire_sys = getattr(self, "_fire_system", None)
+        smoke_sys = getattr(self, "_smoke_system", None)
+        predicted_fg = fg
+        predicted_sg = sg
+
+        if fire_sys is not None and smoke_sys is not None:
+            # Estimate ticks to reach each exit (rough: straight-line / group speed)
+            avg_dist = np.mean([np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+                                for ex, ey in self.known_exits])
+            group_speed = max(self.speed * 0.75, 0.1)
+            est_ticks = int(avg_dist / group_speed)
+            est_ticks = min(est_ticks, 200)  # Cap at 200 ticks
+
+            if est_ticks > 10:  # Only predict if escort will take meaningful time
+                predicted_fg = predict_spread(
+                    fire_sys.density, fire_sys._burnable,
+                    fire_sys._fire_cells, fire_sys.spread_rate, est_ticks)
+                predicted_sg = predict_spread(
+                    smoke_sys.density, smoke_sys._smokeable,
+                    smoke_sys._fire_cells, smoke_sys.spread_rate, est_ticks)
+
+        # ── Score each exit using PREDICTED conditions ──
         best_exit, best_score = None, float("inf")
         for ex, ey in self.known_exits:
             dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
             congestion = self._exit_counts.get((ex, ey), 0) * 30.0
-            smoke_pen = smoke.get_density_at(ex, ey) * 200.0
+            # Use predicted smoke/fire at exit (will it be safe when we arrive?)
+            er, ec = env.world_to_grid(ex, ey)
+            smoke_pen = 0
             fire_pen = 0
-            if fg is not None:
-                er, ec = env.world_to_grid(ex, ey)
-                if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
-                    fire_pen = fg[er, ec] * 500.0
+            if predicted_sg is not None and 0 <= er < predicted_sg.shape[0] and 0 <= ec < predicted_sg.shape[1]:
+                smoke_pen = predicted_sg[er, ec] * 200.0
+            if predicted_fg is not None and 0 <= er < predicted_fg.shape[0] and 0 <= ec < predicted_fg.shape[1]:
+                fire_pen = predicted_fg[er, ec] * 500.0
             score = dist + congestion + smoke_pen + fire_pen
             if score < best_score:
                 best_score = score
@@ -2213,29 +2289,27 @@ class RouterGuide(Guide):
 
         self._escort_exit = best_exit
         if best_exit:
-            # Build danger grid identical to Sweeper (smoke full weight when carrying group)
-            if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 1.0)
-            elif fg is not None:
-                danger = fg
-            elif sg is not None:
-                danger = sg * 1.0
+            # Build PREDICTED danger grid for path validation
+            if predicted_fg is not None and predicted_sg is not None:
+                danger = np.maximum(predicted_fg, predicted_sg * 1.0)
+            elif predicted_fg is not None:
+                danger = predicted_fg
+            elif predicted_sg is not None:
+                danger = predicted_sg * 1.0
             else:
                 danger = None
 
-            # Primary: congestion-aware Dijkstra (Zhang et al. 2020)
+            # Primary: Dijkstra with predicted density + congestion
             dij_path = dijkstra_congestion_path(
                 env,
                 self.pos,
                 np.array(best_exit),
-                fire_grid=fg,
-                smoke_grid=sg,
+                fire_grid=predicted_fg,
+                smoke_grid=predicted_sg,
                 civilian_density=self._density_grid,
             )
 
-            # Validate Dijkstra path: reject if it goes through fire/heavy smoke.
-            # Dijkstra uses soft penalties (cost += fire*20), but we need HARD
-            # avoidance when carrying civilians (identical to Sweeper's BFS approach).
+            # Validate: reject Dijkstra path if it goes through predicted danger
             dij_safe = True
             if dij_path and danger is not None:
                 for wp in dij_path:
@@ -2248,7 +2322,7 @@ class RouterGuide(Guide):
             if dij_path and dij_safe:
                 self._waypoints = dij_path
             else:
-                # BFS with danger grid (identical to Sweeper's escort pathfinding)
+                # BFS fallback with predicted danger grid
                 self._waypoints = bfs_path(
                     env, self.pos, np.array(best_exit), fire_grid=danger
                 )

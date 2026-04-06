@@ -6,7 +6,9 @@ mid-escort re-evaluation, danger detection (all phases), smoke-aware paths,
 min/max group, stuck prevention, destination safety check, reroute cooldown.
 """
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _project_root)
+os.chdir(_project_root)
 
 import numpy as np
 from config import SimConfig

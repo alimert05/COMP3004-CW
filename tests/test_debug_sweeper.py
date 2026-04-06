@@ -5,7 +5,9 @@ escort to nearest exit, releasing, unlimited escort recruit,
 cleared room skipping, smoke-aware paths, self-evacuation.
 """
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _project_root)
+os.chdir(_project_root)
 
 import numpy as np
 from config import SimConfig
