@@ -1385,10 +1385,40 @@ class RouterGuide(Guide):
     # ── Phase behaviors ──
 
     def _do_scanning(self, env, smoke, civilians):
+        # DANGER CHECK: if guide has ANY civilians and smoke/fire nearby,
+        # escort immediately — don't let them die waiting for min_group.
+        # Identical pattern to _do_collecting and _do_returning.
+        if self._group:
+            danger = False
+            sg = getattr(self, "_smoke_grid", None)
+            fg = getattr(self, "_fire_grid", None)
+            rows, cols = env.grid.shape
+            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = gr + dr, gc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if fg is not None and fg[nr, nc] > 0.1:
+                            danger = True
+                            break
+                        if sg is not None and sg[nr, nc] > 0.4:
+                            danger = True
+                            break
+                if danger:
+                    break
+            if not danger:
+                for civ in self._group:
+                    if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                        danger = True
+                        break
+            if danger:
+                self._start_escort(env, smoke, civilians)
+                return
+
         if self._waypoints:
             self._follow_path(env)
             self._recruit_nearby(env, smoke, civilians)
-            # FIX 3: max_group reached while walking → escort immediately
+            # max_group reached while walking → escort immediately
             if len(self._group) >= self._max_group:
                 self._start_escort(env, smoke, civilians)
             return
