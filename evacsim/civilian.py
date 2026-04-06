@@ -120,22 +120,25 @@ class Civilian:
                 self._reaction_counter = 0
             return
 
-        # ── REACTING: freeze, then move ──
-        if self.state == REACTING:
-            self._reaction_counter += 1
-            if self._reaction_counter >= self._reaction_delay:
-                self._start_moving(env)
-            return
-
         # ── Rule 5: Potency damage (no recovery) ──
+        # Applied BEFORE state-specific logic so that REACTING civilians
+        # still take fire/smoke damage. Fire burns you whether you're
+        # frozen in panic or not (Kasereka 2018).
         if in_fire:
-            self.potency -= 3.0
+            self.potency -= 3.0 * local_fire
         elif in_smoke:
             self.potency -= local_smoke
 
         if self.potency <= 0:
             self.state = DEAD
             self.vel = np.zeros(2)
+            return
+
+        # ── REACTING: freeze, then move ──
+        if self.state == REACTING:
+            self._reaction_counter += 1
+            if self._reaction_counter >= self._reaction_delay:
+                self._start_moving(env)
             return
 
         # ── Vision & speed ──
@@ -145,7 +148,7 @@ class Civilian:
         # ── Opportunistic: spot exit (uses exit_vision — small signs, easy to miss) ──
         # FOLLOWING_GUIDE civilians CAN spot exits — if you see an exit door,
         # you go through it. You don't wait for the guide to announce it.
-        if exit_vision > 0 and self.state not in (MOVING_TO_EXIT,):
+        if exit_vision > 0 and self.state not in (MOVING_TO_EXIT, QUEUED):
             exit_pos = self._spot_exit(env, exit_vision)
             if exit_pos is not None:
                 # If in a guide's group, leave the group first
@@ -268,7 +271,10 @@ class Civilian:
 
                 # Too far for too long? Give up
                 if dist_to_guide > env.cell_size * 20 and self._stuck_ticks >= 8:
-                    guide._group.remove(self)
+                    try:
+                        guide._group.remove(self)
+                    except ValueError:
+                        pass
                     self.assigned_guide = None
                     self.state = WANDERING
                     self._walk_dir = None
@@ -418,7 +424,9 @@ class Civilian:
         """
         # ── COHESION via BFS (not direct vector) ──
         # Recompute path every 8 ticks or when cache is empty
-        if not self._boids_bfs_cache or self._stuck_ticks % 8 == 0:
+        self._boids_bfs_tick += 1
+        if not self._boids_bfs_cache or self._boids_bfs_tick >= 8:
+            self._boids_bfs_tick = 0
             fg = getattr(self, '_fire_grid', None)
             self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)
 
@@ -504,6 +512,13 @@ class Civilian:
                     sep_force[0] += (dx / dn) * strength
                     sep_force[1] += (dy / dn) * strength
             self.vel = self.vel + sep_force * speed * 0.4
+
+        # Clamp velocity magnitude to prevent separation force pushing
+        # civilians through thin walls (Reynolds 1987 — max speed limit)
+        vmag = np.linalg.norm(self.vel)
+        max_vel = speed * 2.0
+        if vmag > max_vel:
+            self.vel = (self.vel / vmag) * max_vel
 
         vx, vy = self.vel
 
