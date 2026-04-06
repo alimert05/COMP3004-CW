@@ -891,11 +891,42 @@ class SweeperGuide(Guide):
             self._follow_path(env)
 
     def _do_escorting(self, env, smoke, civilians):
-        """Lead group to exit. Pick up anyone on the way (no limit during escort)."""
+        """Lead group to exit. Pick up anyone on the way (no limit during escort).
+        Includes danger detection: if fire/smoke threatens group, reroute to
+        nearest safe exit immediately."""
         if not self._group:
             self._phase = self.RETURNING
             self._advance_patrol(env)
             return
+
+        # DANGER CHECK: if fire/smoke near guide or group members, reroute
+        # to nearest safe exit. Prevents leading civilians through fire.
+        danger = False
+        sg = getattr(self, "_smoke_grid", None)
+        fg = getattr(self, "_fire_grid", None)
+        rows, cols = env.grid.shape
+        gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = gr + dr, gc + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if fg is not None and fg[nr, nc] > 0.1:
+                        danger = True
+                        break
+                    if sg is not None and sg[nr, nc] > 0.4:
+                        danger = True
+                        break
+            if danger:
+                break
+        if not danger:
+            for civ in self._group:
+                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                    danger = True
+                    break
+        if danger:
+            # Reroute to nearest safe exit (same logic as _start_escort)
+            self._start_escort(env)
+
         # Pick up anyone we pass — no group limit during escort
         self._recruit_nearby_escort(env, smoke, civilians)
         if not self._waypoints:
@@ -1169,23 +1200,29 @@ class SweeperGuide(Guide):
             if not is_dangerous:
                 break  # Found a safe patrol point
 
-        # Compute path — avoid smoke if carrying group
+        # Compute path — avoid smoke if carrying group, light smoke avoidance solo
         if self._group:
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 0.5)
+                danger = np.maximum(fg, sg * 1.0)
             elif fg is not None:
                 danger = fg
             elif sg is not None:
-                danger = sg * 0.5
+                danger = sg * 1.0
             else:
                 danger = None
-            self._waypoints = bfs_path(
-                env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger
-            )
         else:
-            self._waypoints = bfs_path(
-                env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=fg
-            )
+            # Solo: avoid fire + light smoke (guides take smoke damage too)
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 0.3)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 0.3
+            else:
+                danger = None
+        self._waypoints = bfs_path(
+            env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger
+        )
 
 
 def spawn_sweeper_guides(
