@@ -1403,27 +1403,14 @@ class RouterGuide(Guide):
             self._phase = self.RESPONDING
         elif len(self._group) >= self._min_group:
             self._start_escort(env, smoke, civilians)
-        else:
-            # FIX 2: No hotspot, no group — check if there are ANY civilians
-            # still needing help. If not, go to nearest exit and wait there
-            # (don't stand in the middle of the map doing nothing).
-            from evacsim.civilian import ESCAPED, DEAD
-            need_help = sum(1 for c in civilians
-                           if c.state not in (ESCAPED, DEAD)
-                           and c.assigned_guide is None)
-            if need_help == 0:
-                # Nobody left — head to nearest exit and leave the building
-                nearest = min(self.known_exits,
-                              key=lambda e: np.hypot(self.pos[0]-e[0], self.pos[1]-e[1]))
-                dist_to_exit = np.hypot(self.pos[0]-nearest[0], self.pos[1]-nearest[1])
-                if dist_to_exit < env.cell_size:
-                    # At exit — leave the building (same as self-evacuation)
-                    self.alive = False
-                    return
-                fg = getattr(self, "_fire_grid", None)
-                sg = getattr(self, "_smoke_grid", None)
-                danger = self._build_solo_danger_grid(fg, sg)
-                self._waypoints = bfs_path(env, self.pos, np.array(nearest), fire_grid=danger)
+        elif not self._waypoints:
+            # No hotspot, no group — keep moving like Sweeper does.
+            # Walk back to territory center and re-scan on arrival.
+            # Never stand still, never quit — keep searching.
+            fg = getattr(self, "_fire_grid", None)
+            sg = getattr(self, "_smoke_grid", None)
+            danger = self._build_solo_danger_grid(fg, sg)
+            self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
 
     def _do_responding(self, env, smoke=None, civilians=None):
         # FIX 3: max_group reached while walking to hotspot → escort immediately
