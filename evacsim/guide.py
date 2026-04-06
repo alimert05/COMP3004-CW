@@ -173,17 +173,32 @@ def dijkstra_congestion_path(
 
 
 def build_density_grid(env, civilians):
-    """Build a 2D grid of civilian density per cell.
-    Used by Router for congestion-aware pathfinding (Zhang et al. 2020)."""
+    """Build a 2D grid of civilian density per cell with 3x3 blur.
+    Used by Router for congestion-aware Dijkstra pathfinding (Zhang et al. 2020).
+
+    Each civilian adds density to a 3x3 neighbourhood: 1.0 at their cell,
+    0.5 at adjacent cells. This makes corridors NEAR crowds more expensive,
+    not just the exact cells civilians stand on. Without blurring, the
+    density is too sparse (1 civilian per cell) for Dijkstra to find
+    meaningfully different paths from BFS."""
     from evacsim.civilian import ESCAPED, DEAD
 
-    grid = np.zeros(env.grid.shape, dtype=float)
+    rows, cols = env.grid.shape
+    grid = np.zeros((rows, cols), dtype=float)
     for civ in civilians:
         if civ.state in (ESCAPED, DEAD):
             continue
         r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
-        if 0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]:
+        if 0 <= r < rows and 0 <= c < cols:
             grid[r, c] += 1.0
+            # Spread density to 3x3 neighbourhood (adjacent cells get 0.5)
+            for dr in range(-1, 2):
+                for dc in range(-1, 2):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        grid[nr, nc] += 0.5
     return grid
 
 
@@ -1372,8 +1387,10 @@ class RouterGuide(Guide):
     def _do_scanning(self, env, smoke, civilians):
         if self._waypoints:
             self._follow_path(env)
-            # Recruit while walking to home
             self._recruit_nearby(env, smoke, civilians)
+            # FIX 3: max_group reached while walking → escort immediately
+            if len(self._group) >= self._max_group:
+                self._start_escort(env, smoke, civilians)
             return
         self.vel = np.zeros(2)
         # Scan for congestion hotspot in territory
@@ -1381,24 +1398,76 @@ class RouterGuide(Guide):
         if hotspot is not None:
             fg = getattr(self, "_fire_grid", None)
             sg = getattr(self, "_smoke_grid", None)
-            # Smoke-aware path even when solo (guides take smoke damage too)
             danger = self._build_solo_danger_grid(fg, sg)
             self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=danger)
             self._phase = self.RESPONDING
         elif len(self._group) >= self._min_group:
-            # Picked up enough civilians while walking — escort them
             self._start_escort(env, smoke, civilians)
+        else:
+            # FIX 2: No hotspot, no group — check if there are ANY civilians
+            # still needing help. If not, go to nearest exit and wait there
+            # (don't stand in the middle of the map doing nothing).
+            from evacsim.civilian import ESCAPED, DEAD
+            need_help = sum(1 for c in civilians
+                           if c.state not in (ESCAPED, DEAD)
+                           and c.assigned_guide is None)
+            if need_help == 0:
+                # Nobody left — head to nearest exit and leave the building
+                nearest = min(self.known_exits,
+                              key=lambda e: np.hypot(self.pos[0]-e[0], self.pos[1]-e[1]))
+                dist_to_exit = np.hypot(self.pos[0]-nearest[0], self.pos[1]-nearest[1])
+                if dist_to_exit < env.cell_size:
+                    # At exit — leave the building (same as self-evacuation)
+                    self.alive = False
+                    return
+                fg = getattr(self, "_fire_grid", None)
+                sg = getattr(self, "_smoke_grid", None)
+                danger = self._build_solo_danger_grid(fg, sg)
+                self._waypoints = bfs_path(env, self.pos, np.array(nearest), fire_grid=danger)
 
     def _do_responding(self, env, smoke=None, civilians=None):
+        # FIX 3: max_group reached while walking to hotspot → escort immediately
+        if len(self._group) >= self._max_group:
+            self._start_escort(env, smoke, civilians)
+            return
+
         if not self._waypoints:
             self._phase = self.COLLECTING
             self._collect_wait = 0
             self.vel = np.zeros(2)
         else:
+            # Safety check: is our destination (hotspot) now dangerous?
+            # FIX 1: lower smoke threshold when carrying civilians (they're vulnerable)
+            destination = self._waypoints[-1]
+            dr, dc = env.world_to_grid(destination[0], destination[1])
+            fg = getattr(self, "_fire_grid", None)
+            sg = getattr(self, "_smoke_grid", None)
+            rows, cols = env.grid.shape
+            smoke_limit = 0.3 if self._group else 0.5
+            if fg is not None and 0 <= dr < rows and 0 <= dc < cols and fg[dr, dc] > 0.2:
+                self._waypoints.clear()
+                if self._group:
+                    # Have civilians — escort them to safety instead of scanning
+                    self._start_escort(env, smoke, civilians)
+                else:
+                    self._phase = self.SCANNING
+                    self.vel = np.zeros(2)
+                return
+            if sg is not None and 0 <= dr < rows and 0 <= dc < cols and sg[dr, dc] > smoke_limit:
+                self._waypoints.clear()
+                if self._group:
+                    self._start_escort(env, smoke, civilians)
+                else:
+                    self._phase = self.SCANNING
+                    self.vel = np.zeros(2)
+                return
+
             self._follow_path(env)
-            # Recruit while walking to hotspot
             if smoke and civilians:
                 self._recruit_nearby(env, smoke, civilians)
+                # FIX 3: also check max_group after recruiting
+                if len(self._group) >= self._max_group:
+                    self._start_escort(env, smoke, civilians)
 
     def _do_collecting(self, env, smoke, civilians):
         """At hotspot: recruit civilians into group. Soft limit — collect
@@ -1452,13 +1521,20 @@ class RouterGuide(Guide):
         timed_out = self._collect_wait >= self._max_collect_wait
         if has_enough or timed_out:
             if self._group:
-                # Only escort if decent group (min threshold), unless nobody else nearby
                 if len(self._group) >= self._min_group:
                     self._start_escort(env, smoke, civilians)
                 else:
-                    # Small group — scan for another hotspot instead of wasting a trip
-                    self._phase = self.SCANNING
-                    self.vel = np.zeros(2)
+                    # Small group — check if anyone nearby is worth waiting for
+                    recruitable = self._count_recruitable(env, smoke, civilians)
+                    if recruitable == 0:
+                        # Nobody nearby — scan for another hotspot instead of wasting a trip
+                        self._phase = self.SCANNING
+                        self.vel = np.zeros(2)
+                    # else: keep collecting (reset wait timer for one more round)
+                    # Don't reset indefinitely — if still small after second wait, move on
+                    elif self._collect_wait >= self._max_collect_wait * 2:
+                        self._phase = self.SCANNING
+                        self.vel = np.zeros(2)
             else:
                 self._phase = self.RETURNING
                 fg = getattr(self, "_fire_grid", None)
@@ -1468,7 +1544,11 @@ class RouterGuide(Guide):
 
     def _do_escorting(self, env, smoke, civilians):
         """Lead group to optimal exit. KEY: always pick up civilians on the
-        way — no group limit while escorting. Maximize survivors per trip."""
+        way — no group limit while escorting. Maximize survivors per trip.
+
+        Periodically re-evaluates exit choice during escort. If congestion
+        shifts significantly (a much better exit appears), re-routes.
+        This prevents committing to a bad exit for the entire trip."""
         if not self._group:
             # Everyone died — abort escort, go back to scanning
             self._phase = self.RETURNING
@@ -1477,7 +1557,115 @@ class RouterGuide(Guide):
             danger = self._build_solo_danger_grid(fg, sg)
             self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
             return
+
+        # IMMEDIATE DANGER CHECK: if guide or group members are in/near fire,
+        # find the safest exit and reroute. Uses same danger detection as
+        # Sweeper's _do_collecting and _do_returning.
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
+        guide_in_danger = False
+        # Check guide surroundings (2-cell radius, same as Sweeper)
+        gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+        rows, cols = env.grid.shape
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                nr, nc = gr + dr, gc + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if fg is not None and fg[nr, nc] > 0.1:
+                        guide_in_danger = True
+                        break
+                    if sg is not None and sg[nr, nc] > 0.4:
+                        guide_in_danger = True
+                        break
+            if guide_in_danger:
+                break
+        # Check group members (they're vulnerable)
+        if not guide_in_danger:
+            for civ in self._group:
+                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                    guide_in_danger = True
+                    break
+        if guide_in_danger:
+            # Emergency: re-pick the safest exit from current position and reroute
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 1.0)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 1.0
+            else:
+                danger = None
+            # Pick exit with best score from HERE (may differ from original)
+            best_exit, best_score = self._escort_exit, float("inf")
+            for ex, ey in self.known_exits:
+                dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+                cong = self._exit_counts.get((ex, ey), 0) * 30.0
+                s_pen = smoke.get_density_at(ex, ey) * 200.0
+                f_pen = 0
+                if fg is not None:
+                    er, ec = env.world_to_grid(ex, ey)
+                    if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
+                        f_pen = fg[er, ec] * 500.0
+                score = dist + cong + s_pen + f_pen
+                if score < best_score:
+                    best_score = score
+                    best_exit = (ex, ey)
+            self._escort_exit = best_exit
+            self._waypoints = bfs_path(
+                env, self.pos, np.array(best_exit), fire_grid=danger
+            )
+
         self._recruit_nearby_unlimited(env, smoke, civilians)
+
+        # Re-evaluate exit every eval_interval ticks during escort.
+        # If a significantly better exit appears (>30% better score),
+        # switch target and recompute Dijkstra path.
+        if self._eval_counter == 0 and self._escort_exit is not None:
+            fg = getattr(self, "_fire_grid", None)
+            sg = getattr(self, "_smoke_grid", None)
+            # Score current exit
+            cx, cy = self._escort_exit
+            cur_dist = np.hypot(self.pos[0] - cx, self.pos[1] - cy)
+            cur_cong = self._exit_counts.get((cx, cy), 0) * 30.0
+            cur_smoke = smoke.get_density_at(cx, cy) * 200.0
+            cur_score = cur_dist + cur_cong + cur_smoke
+
+            # Check all exits for a better option
+            for ex, ey in self.known_exits:
+                if (ex, ey) == self._escort_exit:
+                    continue
+                dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+                cong = self._exit_counts.get((ex, ey), 0) * 30.0
+                s_pen = smoke.get_density_at(ex, ey) * 200.0
+                f_pen = 0
+                if fg is not None:
+                    er, ec = env.world_to_grid(ex, ey)
+                    if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
+                        f_pen = fg[er, ec] * 500.0
+                new_score = dist + cong + s_pen + f_pen
+                # Only switch if >30% better (avoid oscillation)
+                if new_score < cur_score * 0.7:
+                    self._escort_exit = (ex, ey)
+                    self._waypoints = dijkstra_congestion_path(
+                        env, self.pos, np.array((ex, ey)),
+                        fire_grid=fg, smoke_grid=sg,
+                        civilian_density=self._density_grid,
+                    )
+                    # BFS fallback if Dijkstra returns empty
+                    if not self._waypoints:
+                        if fg is not None and sg is not None:
+                            danger = np.maximum(fg, sg * 1.0)
+                        elif fg is not None:
+                            danger = fg
+                        elif sg is not None:
+                            danger = sg * 1.0
+                        else:
+                            danger = None
+                        self._waypoints = bfs_path(
+                            env, self.pos, np.array((ex, ey)), fire_grid=danger
+                        )
+                    break  # Switch once per re-evaluation
+
         if not self._waypoints:
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
@@ -1486,7 +1674,24 @@ class RouterGuide(Guide):
                     self._release_wait = 0
                     self.vel = np.zeros(2)
                     return
-            self.vel = np.zeros(2)
+                # STUCK FIX: waypoints empty but not near exit.
+                # Recompute path using BFS with danger grid (Sweeper pattern).
+                # This prevents guide standing still mid-escort.
+                fg = getattr(self, "_fire_grid", None)
+                sg = getattr(self, "_smoke_grid", None)
+                if fg is not None and sg is not None:
+                    danger = np.maximum(fg, sg * 1.0)
+                elif fg is not None:
+                    danger = fg
+                elif sg is not None:
+                    danger = sg * 1.0
+                else:
+                    danger = None
+                self._waypoints = bfs_path(
+                    env, self.pos, np.array(self._escort_exit), fire_grid=danger
+                )
+            if not self._waypoints:
+                self.vel = np.zeros(2)
         else:
             self._follow_path(env)
 
@@ -1518,6 +1723,10 @@ class RouterGuide(Guide):
                     civ.assigned_guide = None
                     civ.state = WANDERING
             self._group.clear()
+            # SMART RETURN: scan for hotspot from current position first.
+            # Don't walk back to territory center if there's a hotspot to respond to.
+            # _find_hotspot scans the whole territory regardless of guide position,
+            # so being at the center provides no scanning advantage.
             self._phase = self.RETURNING
             fg = getattr(self, "_fire_grid", None)
             sg = getattr(self, "_smoke_grid", None)
@@ -1525,18 +1734,74 @@ class RouterGuide(Guide):
             self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
 
     def _do_returning(self, env, smoke=None, civilians=None):
+        """Return to territory center. Identical danger logic to Sweeper:
+        if smoke/fire threatens group members, emergency escort."""
+        if not smoke or not civilians:
+            if not self._waypoints:
+                self._phase = self.SCANNING
+                self.vel = np.zeros(2)
+            else:
+                self._follow_path(env)
+            return
+
+        # Max group → escort immediately
+        if len(self._group) >= self._max_group:
+            self._start_escort(env, smoke, civilians)
+            return
+
+        # DANGER CHECK (identical to Sweeper _do_returning):
+        # if group members in smoke or fire/smoke near guide → emergency escort
+        if self._group:
+            danger = False
+            # Check group members first (they're vulnerable, no masks)
+            for civ in self._group:
+                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                    danger = True
+                    break
+            # Check guide surroundings (2-cell radius)
+            if not danger:
+                sg = getattr(self, "_smoke_grid", None)
+                fg = getattr(self, "_fire_grid", None)
+                if sg is not None or fg is not None:
+                    gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+                    rows, cols = env.grid.shape
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            nr, nc = gr + dr, gc + dc
+                            if 0 <= nr < rows and 0 <= nc < cols:
+                                if fg is not None and fg[nr, nc] > 0.1:
+                                    danger = True
+                                    break
+                                if sg is not None and sg[nr, nc] > 0.4:
+                                    danger = True
+                                    break
+                        if danger:
+                            break
+            if danger:
+                self._start_escort(env, smoke, civilians)
+                return
+
+        # Scan for hotspots while walking home.
+        # If found, pivot directly — skip the walk home.
+        hotspot = self._find_hotspot(env, smoke, civilians)
+        if hotspot is not None:
+            fg = getattr(self, "_fire_grid", None)
+            sg = getattr(self, "_smoke_grid", None)
+            danger = self._build_solo_danger_grid(fg, sg)
+            self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=danger)
+            self._phase = self.RESPONDING
+            return
+
         if not self._waypoints:
             self._phase = self.SCANNING
             self.vel = np.zeros(2)
         else:
             self._follow_path(env)
             # Recruit while walking home
-            if smoke and civilians:
-                self._recruit_nearby(env, smoke, civilians)
-                # Only divert to escort if we have a decent group (min threshold)
-                # Don't waste a full trip for 1-2 people picked up on the way
-                if len(self._group) >= self._min_group:
-                    self._start_escort(env, smoke, civilians)
+            self._recruit_nearby(env, smoke, civilians)
+            # Only divert to escort if we have a decent group (min threshold)
+            if len(self._group) >= self._min_group:
+                self._start_escort(env, smoke, civilians)
 
     # ── Intelligence methods ──
 
@@ -1557,16 +1822,18 @@ class RouterGuide(Guide):
         sg = getattr(self, "_smoke_grid", None)
         region = 5
         best_pos, best_score = None, 1  # Need score > 1 to trigger
+        # Lower smoke threshold when carrying civilians (they're vulnerable)
+        smoke_limit = 0.3 if self._group else 0.6
 
         for rr in range(min_r, min(max_r, rows), region):
             for rc in range(min_c, min(max_c, cols), region):
                 cr = min(rr + region // 2, rows - 1)
                 cc = min(rc + region // 2, cols - 1)
-                # Skip regions on fire (too dangerous for guide)
+                # Skip regions on fire (too dangerous)
                 if fg is not None and fg[cr, cc] > 0.2:
                     continue
-                # Skip regions with very heavy smoke (guide can't recruit there)
-                if sg is not None and sg[cr, cc] > 0.6:
+                # Skip smoky regions (lower threshold when carrying group)
+                if sg is not None and sg[cr, cc] > smoke_limit:
                     continue
                 score, n, sx, sy = 0.0, 0, 0.0, 0.0
                 for civ in civilians:
@@ -1669,6 +1936,29 @@ class RouterGuide(Guide):
                     civ.assigned_guide = self
                     civ.state = FOLLOWING_GUIDE
 
+    def _count_recruitable(self, env, smoke, civilians):
+        """Count civilians that can ACTUALLY be recruited (visual range + LOS).
+        Must match what _recruit_nearby can reach — no false positives.
+        Used in _do_collecting to decide: keep waiting or move on?"""
+        radius = self.get_visual_recruit_radius(smoke)
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            ESCAPED,
+            DEAD,
+            FOLLOWING_GUIDE,
+        )
+
+        count = 0
+        for civ in civilians:
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+                continue
+            if civ.assigned_guide is not None:
+                continue
+            dist = np.linalg.norm(civ.pos - self.pos)
+            if dist < radius and self._has_line_of_sight(civ.pos, env):
+                count += 1
+        return count
+
     def _start_escort(self, env, smoke, civilians):
         """Find LEAST CONGESTED exit using density-aware scoring, then
         use congestion-aware Dijkstra to plan the path."""
@@ -1694,8 +1984,18 @@ class RouterGuide(Guide):
 
         self._escort_exit = best_exit
         if best_exit:
-            # Use congestion-aware Dijkstra (Zhang et al. 2020)
-            self._waypoints = dijkstra_congestion_path(
+            # Build danger grid identical to Sweeper (smoke full weight when carrying group)
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 1.0)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 1.0
+            else:
+                danger = None
+
+            # Primary: congestion-aware Dijkstra (Zhang et al. 2020)
+            dij_path = dijkstra_congestion_path(
                 env,
                 self.pos,
                 np.array(best_exit),
@@ -1704,22 +2004,63 @@ class RouterGuide(Guide):
                 civilian_density=self._density_grid,
             )
 
-    def _update_exit_counts(self, civilians):
-        from evacsim.civilian import MOVING_TO_EXIT, QUEUED
+            # Validate Dijkstra path: reject if it goes through fire/heavy smoke.
+            # Dijkstra uses soft penalties (cost += fire*20), but we need HARD
+            # avoidance when carrying civilians (identical to Sweeper's BFS approach).
+            dij_safe = True
+            if dij_path and danger is not None:
+                for wp in dij_path:
+                    wr, wc = env.world_to_grid(wp[0], wp[1])
+                    if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
+                        if danger[wr, wc] > 0.3:
+                            dij_safe = False
+                            break
 
-        self._exit_counts = {(ex, ey): 0 for ex, ey in self.known_exits}
+            if dij_path and dij_safe:
+                self._waypoints = dij_path
+            else:
+                # BFS with danger grid (identical to Sweeper's escort pathfinding)
+                self._waypoints = bfs_path(
+                    env, self.pos, np.array(best_exit), fire_grid=danger
+                )
+
+    def _update_exit_counts(self, civilians):
+        """Count civilians heading to each exit (confirmed + predicted).
+
+        Confirmed: civilians in MOVING_TO_EXIT or QUEUED with a known target.
+        Predicted: all other active civilians counted toward their nearest exit
+        at half weight — they WILL likely go there eventually.
+
+        This gives Router early congestion awareness even before civilians
+        have found exits, enabling smarter exit selection from tick 1."""
+        from evacsim.civilian import MOVING_TO_EXIT, QUEUED, ESCAPED, DEAD, FOLLOWING_GUIDE
+
+        self._exit_counts = {(ex, ey): 0.0 for ex, ey in self.known_exits}
         for civ in civilians:
-            if civ.state not in (MOVING_TO_EXIT, QUEUED) or civ._target_exit is None:
+            if civ.state in (ESCAPED, DEAD):
                 continue
-            tx, ty = civ._target_exit
-            best, best_d = None, float("inf")
-            for ex, ey in self.known_exits:
-                d = np.hypot(tx - ex, ty - ey)
-                if d < best_d:
-                    best_d = d
-                    best = (ex, ey)
-            if best and best_d < 20:
-                self._exit_counts[best] += 1
+
+            if civ.state in (MOVING_TO_EXIT, QUEUED) and civ._target_exit is not None:
+                # Confirmed: heading to specific exit (weight 1.0)
+                tx, ty = civ._target_exit
+                best, best_d = None, float("inf")
+                for ex, ey in self.known_exits:
+                    d = np.hypot(tx - ex, ty - ey)
+                    if d < best_d:
+                        best_d = d
+                        best = (ex, ey)
+                if best and best_d < 20:
+                    self._exit_counts[best] += 1.0
+            elif civ.state != FOLLOWING_GUIDE and civ.assigned_guide is None:
+                # Predicted: will likely go to nearest exit (weight 0.5)
+                best, best_d = None, float("inf")
+                for ex, ey in self.known_exits:
+                    d = np.hypot(civ.pos[0] - ex, civ.pos[1] - ey)
+                    if d < best_d:
+                        best_d = d
+                        best = (ex, ey)
+                if best:
+                    self._exit_counts[best] += 0.5
 
     def _build_solo_danger_grid(self, fg, sg):
         """Build a danger grid for solo movement (no group).
