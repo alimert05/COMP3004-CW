@@ -1442,6 +1442,10 @@ class RouterGuide(Guide):
         self._collect_wait = 0
         self._max_collect_wait = 30
 
+        # Internal tick counter + danger reroute cooldown
+        self._tick = 0
+        self._danger_reroute_tick = -999
+
         # Adaptive search: DBSCAN → individual fallback (two-phase strategy)
         # After N consecutive scans with no clusters, switch to individual search
         self._no_cluster_count = 0
@@ -1478,6 +1482,8 @@ class RouterGuide(Guide):
         if self._do_self_evacuation(env):
             self._release_group_wandering()
             return
+
+        self._tick += 1
 
         # Update density + congestion data
         self._eval_counter += 1
@@ -1567,10 +1573,39 @@ class RouterGuide(Guide):
             self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
 
     def _do_responding(self, env, smoke=None, civilians=None):
-        # FIX 3: max_group reached while walking to hotspot → escort immediately
+        # max_group reached while walking to hotspot → escort immediately
         if len(self._group) >= self._max_group:
             self._start_escort(env, smoke, civilians)
             return
+
+        # DANGER CHECK: if group members in smoke/fire → emergency escort.
+        # Same pattern as _do_scanning, _do_collecting, _do_returning.
+        if self._group and smoke:
+            danger = False
+            sg = getattr(self, "_smoke_grid", None)
+            fg = getattr(self, "_fire_grid", None)
+            rows, cols = env.grid.shape
+            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = gr + dr, gc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if fg is not None and fg[nr, nc] > 0.1:
+                            danger = True
+                            break
+                        if sg is not None and sg[nr, nc] > 0.4:
+                            danger = True
+                            break
+                if danger:
+                    break
+            if not danger:
+                for civ in self._group:
+                    if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
+                        danger = True
+                        break
+            if danger:
+                self._start_escort(env, smoke, civilians)
+                return
 
         if not self._waypoints:
             self._phase = self.COLLECTING
@@ -1699,62 +1734,60 @@ class RouterGuide(Guide):
             self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
             return
 
-        # IMMEDIATE DANGER CHECK: if guide or group members are in/near fire,
-        # find the safest exit and reroute. Uses same danger detection as
-        # Sweeper's _do_collecting and _do_returning.
-        fg = getattr(self, "_fire_grid", None)
-        sg = getattr(self, "_smoke_grid", None)
-        guide_in_danger = False
-        # Check guide surroundings (2-cell radius, same as Sweeper)
-        gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
-        rows, cols = env.grid.shape
-        for dr in range(-2, 3):
-            for dc in range(-2, 3):
-                nr, nc = gr + dr, gc + dc
-                if 0 <= nr < rows and 0 <= nc < cols:
-                    if fg is not None and fg[nr, nc] > 0.1:
-                        guide_in_danger = True
-                        break
-                    if sg is not None and sg[nr, nc] > 0.4:
+        # IMMEDIATE DANGER CHECK with cooldown: if guide or group members are
+        # in/near fire, reroute to safest exit. Cooldown prevents recomputing
+        # BFS every tick while in the danger zone (10-tick grace period).
+        if self._tick - self._danger_reroute_tick >= 10:
+            fg = getattr(self, "_fire_grid", None)
+            sg = getattr(self, "_smoke_grid", None)
+            guide_in_danger = False
+            gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
+            rows, cols = env.grid.shape
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = gr + dr, gc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols:
+                        if fg is not None and fg[nr, nc] > 0.1:
+                            guide_in_danger = True
+                            break
+                        if sg is not None and sg[nr, nc] > 0.4:
+                            guide_in_danger = True
+                            break
+                if guide_in_danger:
+                    break
+            if not guide_in_danger:
+                for civ in self._group:
+                    if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
                         guide_in_danger = True
                         break
             if guide_in_danger:
-                break
-        # Check group members (they're vulnerable)
-        if not guide_in_danger:
-            for civ in self._group:
-                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
-                    guide_in_danger = True
-                    break
-        if guide_in_danger:
-            # Emergency: re-pick the safest exit from current position and reroute
-            if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 1.0)
-            elif fg is not None:
-                danger = fg
-            elif sg is not None:
-                danger = sg * 1.0
-            else:
-                danger = None
-            # Pick exit with best score from HERE (may differ from original)
-            best_exit, best_score = self._escort_exit, float("inf")
-            for ex, ey in self.known_exits:
-                dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-                cong = self._exit_counts.get((ex, ey), 0) * 30.0
-                s_pen = smoke.get_density_at(ex, ey) * 200.0
-                f_pen = 0
-                if fg is not None:
-                    er, ec = env.world_to_grid(ex, ey)
-                    if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
-                        f_pen = fg[er, ec] * 500.0
-                score = dist + cong + s_pen + f_pen
-                if score < best_score:
-                    best_score = score
-                    best_exit = (ex, ey)
-            self._escort_exit = best_exit
-            self._waypoints = bfs_path(
-                env, self.pos, np.array(best_exit), fire_grid=danger
-            )
+                self._danger_reroute_tick = self._tick  # Start cooldown
+                if fg is not None and sg is not None:
+                    danger = np.maximum(fg, sg * 1.0)
+                elif fg is not None:
+                    danger = fg
+                elif sg is not None:
+                    danger = sg * 1.0
+                else:
+                    danger = None
+                best_exit, best_score = self._escort_exit, float("inf")
+                for ex, ey in self.known_exits:
+                    dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+                    cong = self._exit_counts.get((ex, ey), 0) * 30.0
+                    s_pen = smoke.get_density_at(ex, ey) * 200.0
+                    f_pen = 0
+                    if fg is not None:
+                        er, ec = env.world_to_grid(ex, ey)
+                        if 0 <= er < fg.shape[0] and 0 <= ec < fg.shape[1]:
+                            f_pen = fg[er, ec] * 500.0
+                    score = dist + cong + s_pen + f_pen
+                    if score < best_score:
+                        best_score = score
+                        best_exit = (ex, ey)
+                self._escort_exit = best_exit
+                self._waypoints = bfs_path(
+                    env, self.pos, np.array(best_exit), fire_grid=danger
+                )
 
         self._recruit_nearby_unlimited(env, smoke, civilians)
 
