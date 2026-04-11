@@ -865,8 +865,18 @@ class SweeperGuide(Guide):
     4. RELEASE: at exit, civilians get BFS path to exit and leave group
     5. RETURN: go back for more
 
+    Coordination: when a Sweeper finishes clearing its entire territory,
+    it adopts uncleared patrol points from a peer Sweeper that still has
+    work. This mirrors real fire brigade radio coordination: 'Zone 1 clear,
+    moving to assist Zone 2.' Preserves Sweeper's systematic identity while
+    preventing idle guides when territories are unbalanced.
+
     Spawns from exits (like real firefighters entering the building).
     """
+
+    # Class-level registry of all active Sweepers (populated by spawn function).
+    # Used for territory reallocation between peer Sweepers.
+    _all_sweepers: list = []
 
     COLLECTING = "collecting"
     ESCORTING = "escorting"
@@ -1283,6 +1293,75 @@ class SweeperGuide(Guide):
 
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
+    def _try_reallocate_to_peer(self, env):
+        """Territory reallocation: when this guide's own territory is fully
+        cleared, adopt uncleared patrol points from a peer Sweeper that still
+        has work. Mirrors fire brigade radio coordination. Returns True if
+        reallocation succeeded (patrol_route and waypoints updated)."""
+        best_peer = None
+        best_uncleared = 0
+        for peer in SweeperGuide._all_sweepers:
+            if peer is self or not peer.alive:
+                continue
+            uncleared = sum(
+                1 for i in range(len(peer._patrol_route))
+                if i not in peer._cleared_points
+            )
+            if uncleared > best_uncleared:
+                best_uncleared = uncleared
+                best_peer = peer
+
+        # Only reallocate if peer has enough work to share (avoid ping-pong)
+        if best_peer is None or best_uncleared < 3:
+            return False
+
+        # Take half of peer's uncleared points (both guides keep working)
+        peer_uncleared_indices = [
+            i for i in range(len(best_peer._patrol_route))
+            if i not in best_peer._cleared_points
+        ]
+        n_take = max(1, len(peer_uncleared_indices) // 2)
+        taken_indices = peer_uncleared_indices[:n_take]
+
+        # Copy those patrol points to our new route
+        new_points = [best_peer._patrol_route[i] for i in taken_indices]
+
+        # Mark them as cleared in peer's set so peer doesn't revisit
+        for idx in taken_indices:
+            best_peer._cleared_points.add(idx)
+
+        # Replace our patrol route with the new (adopted) territory
+        self._patrol_route = new_points
+        self._cleared_points = set()
+        self._patrol_idx = 0
+        self._cycle_start_idx = 0
+
+        # Compute waypoints to new first point (danger-aware)
+        fg = getattr(self, "_fire_grid", None)
+        sg = getattr(self, "_smoke_grid", None)
+        if self._group:
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 1.0)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 1.0
+            else:
+                danger = None
+        else:
+            if fg is not None and sg is not None:
+                danger = np.maximum(fg, sg * 0.3)
+            elif fg is not None:
+                danger = fg
+            elif sg is not None:
+                danger = sg * 0.3
+            else:
+                danger = None
+        self._waypoints = bfs_path(
+            env, self.pos, self._patrol_route[0], fire_grid=danger
+        )
+        return True
+
     def _advance_patrol(self, env):
         """Move to next patrol point. Skip cleared and dangerous points."""
         if not self._patrol_route:
@@ -1295,8 +1374,12 @@ class SweeperGuide(Guide):
         for _ in range(len(self._patrol_route)):
             self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
 
-            # Full cycle completed? Reset cleared points (re-check everything)
+            # Full cycle completed? Try territory reallocation before reset.
+            # If we can adopt a peer's uncleared points, do that instead of
+            # re-walking our own (already empty) territory.
             if self._patrol_idx == self._cycle_start_idx:
+                if self._try_reallocate_to_peer(env):
+                    return  # Waypoints already set by reallocation
                 self._cleared_points.clear()
                 self._cycle_start_idx = self._patrol_idx
 
@@ -1390,6 +1473,10 @@ def spawn_sweeper_guides(
                 else:
                     territories[3 % n_guides].append(p)
 
+    # Reset the class-level registry for this new simulation (prevents
+    # pollution between experimental runs).
+    SweeperGuide._all_sweepers = []
+
     guides = []
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
@@ -1399,6 +1486,7 @@ def spawn_sweeper_guides(
         pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
         guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted)
         guides.append(guide)
+        SweeperGuide._all_sweepers.append(guide)
 
     return guides
 
