@@ -38,6 +38,9 @@ class Simulation:
                                   seed=config.seed)
         self.fire = FireSystem(self.env, spread_rate=config.fire_spread_rate,
                                 seed=config.seed + 1)
+        # Fire–smoke coupling: smoke is continuously sourced from fire cells
+        # (Makmul 2020 source-term CA). Must be set AFTER fire is created.
+        self.smoke._fire = self.fire
 
         # Spawn civilians
         self.civilians = spawn_civilians(

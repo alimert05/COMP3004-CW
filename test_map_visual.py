@@ -92,6 +92,8 @@ smoke_frames = load_gif_frames("assets/smoke gif.gif", (CELL, CELL))
 
 smoke_system = SmokeSystem(env, spread_rate=0.02)
 fire_system = FireSystem(env, spread_rate=0.005)
+# Fire–smoke coupling (Makmul 2020 source term)
+smoke_system._fire = fire_system
 
 
 # =====================================================================
