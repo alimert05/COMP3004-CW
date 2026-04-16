@@ -5,7 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config import SimConfig
 from evacsim.simulation import Simulation
 
-for mapname in ['bottleneck_D', 'open_plan_D']:
+for mapname in ['bottleneck_A', 'bottleneck_B', 'bottleneck_C', 'bottleneck_D',
+                'open_plan_A', 'open_plan_B', 'open_plan_C', 'open_plan_D']:
     f = f'maps/{mapname}.txt'
     for policy in ['none', 'beacon', 'sweeper', 'router']:
         config = SimConfig(

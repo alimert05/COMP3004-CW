@@ -210,6 +210,52 @@ def predict_spread(density, spreadable_mask, source_cells, spread_rate, steps):
     return d
 
 
+class RouterBlackboard:
+    """Shared coordination blackboard for Router guides.
+
+    Multi-agent coordination mechanism (blackboard architecture):
+    Routers write claimed hotspot positions when committing to a rescue.
+    Other Routers read the blackboard and skip claimed hotspots to avoid
+    overlap. Claims auto-expire after EXPIRY ticks to handle guide death
+    or rerouting.
+
+    This enables global scanning without territory constraints — Routers
+    dynamically distribute across hotspots rather than being confined to
+    fixed quadrants.
+    """
+
+    EXPIRY = 60  # ticks before a claim expires (3 × eval_interval)
+
+    def __init__(self):
+        self._claims = {}  # guide_id → (position, tick_claimed)
+
+    def claim(self, guide_id, position, tick):
+        """Claim a hotspot position."""
+        self._claims[guide_id] = (np.array(position), tick)
+
+    def release(self, guide_id):
+        """Release a claim (guide finished escorting or died)."""
+        self._claims.pop(guide_id, None)
+
+    def is_claimed(self, position, current_tick, exclude_guide=None,
+                   radius=30.0):
+        """Check if a position is already claimed by another guide.
+        Uses radius matching — positions within `radius` units count as same hotspot."""
+        for gid, (pos, tick) in list(self._claims.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.EXPIRY:
+                del self._claims[gid]  # expired
+                continue
+            if np.linalg.norm(pos - np.array(position)) < radius:
+                return True
+        return False
+
+    def reset(self):
+        """Clear all claims (new simulation)."""
+        self._claims.clear()
+
+
 def dbscan_cluster(points, epsilon, min_points):
     """DBSCAN spatial clustering (Ester et al., 1996).
 
@@ -1611,17 +1657,15 @@ class RouterGuide(Guide):
     RELEASING = "releasing"
     RETURNING = "returning"
 
-    def __init__(self, x, y, speed, env, rng, territory_bounds=None,
+    def __init__(self, x, y, speed, env, rng, blackboard=None,
                  n_civilians: int = 100, n_guides: int = 4):
         super().__init__(x, y, speed, env, rng)
 
-        # Territory
-        if territory_bounds:
-            self._territory = territory_bounds
-        else:
-            self._territory = (0, env.grid.shape[0], 0, env.grid.shape[1])
+        # Global scanning — no fixed territory. Blackboard coordinates Routers.
+        self._blackboard = blackboard or RouterBlackboard()
+        self._guide_id = id(self)  # unique ID for blackboard claims
 
-        self._home_pos = self._find_territory_center(env)
+        self._spawn_pos = np.array([x, y], dtype=float)  # remember spawn exit
         self._waypoints = []
         self._phase = self.SCANNING
 
@@ -1662,28 +1706,7 @@ class RouterGuide(Guide):
         self._no_cluster_count = 0
         self._no_cluster_threshold = 3  # 3 failed scans × 20 ticks = ~60 ticks
 
-        # Walk to territory center
-        self._waypoints = bfs_path(env, self.pos, self._home_pos)
-
-    def _find_territory_center(self, env):
-        min_r, max_r, min_c, max_c = self._territory
-        cr = max(0, min(env.grid.shape[0] - 1, (min_r + max_r) // 2))
-        cc = max(0, min(env.grid.shape[1] - 1, (min_c + max_c) // 2))
-        if env.grid[cr, cc] != CellType.WALL:
-            return np.array(env.grid_to_world(cr, cc), dtype=float)
-        visited = {(cr, cc)}
-        q = deque([(cr, cc)])
-        rows, cols = env.grid.shape
-        while q:
-            r, c = q.popleft()
-            if env.grid[r, c] != CellType.WALL:
-                return np.array(env.grid_to_world(r, c), dtype=float)
-            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols and (nr, nc) not in visited:
-                    visited.add((nr, nc))
-                    q.append((nr, nc))
-        return np.array(env.grid_to_world(cr, cc), dtype=float)
+        # Start scanning immediately from spawn position (no territory walk)
 
     def _effective_max_group(self) -> int:
         """Dynamic commitment ceiling via T-S fuzzy inference (deliberative).
@@ -1844,13 +1867,9 @@ class RouterGuide(Guide):
         elif len(self._group) >= self._min_group:
             self._start_escort(env, smoke, civilians)
         elif not self._waypoints:
-            # No hotspot, no group — keep moving like Sweeper does.
-            # Walk back to territory center and re-scan on arrival.
-            # Never stand still, never quit — keep searching.
-            fg = getattr(self, "_fire_grid", None)
-            sg = getattr(self, "_smoke_grid", None)
-            danger = self._build_solo_danger_grid(fg, sg)
-            self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
+            # No hotspot, no group — stay in SCANNING, will rescan next eval cycle.
+            # No need to walk "home" — global scanning works from any position.
+            self.vel = np.zeros(2)
 
     def _do_responding(self, env, smoke=None, civilians=None):
         # max_group reached while walking to hotspot → escort immediately
@@ -1992,11 +2011,10 @@ class RouterGuide(Guide):
                         self._phase = self.SCANNING
                         self.vel = np.zeros(2)
             else:
-                self._phase = self.RETURNING
-                fg = getattr(self, "_fire_grid", None)
-                sg = getattr(self, "_smoke_grid", None)
-                danger = self._build_solo_danger_grid(fg, sg)
-                self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
+                # No civilians left at collection point — rescan immediately
+                self._blackboard.release(self._guide_id)
+                self._phase = self.SCANNING
+                self.vel = np.zeros(2)
 
     def _do_escorting(self, env, smoke, civilians):
         """Lead group to optimal exit. KEY: always pick up civilians on the
@@ -2006,12 +2024,10 @@ class RouterGuide(Guide):
         shifts significantly (a much better exit appears), re-routes.
         This prevents committing to a bad exit for the entire trip."""
         if not self._group:
-            # Everyone died — abort escort, go back to scanning
-            self._phase = self.RETURNING
-            fg = getattr(self, "_fire_grid", None)
-            sg = getattr(self, "_smoke_grid", None)
-            danger = self._build_solo_danger_grid(fg, sg)
-            self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
+            # Everyone died — abort escort, rescan immediately
+            self._blackboard.release(self._guide_id)
+            self._phase = self.SCANNING
+            self.vel = np.zeros(2)
             return
 
         # IMMEDIATE DANGER CHECK with cooldown: if guide or group members are
@@ -2177,19 +2193,16 @@ class RouterGuide(Guide):
                 if civ.state == FOLLOWING_GUIDE:
                     civ._set_exit_target_force(env, self._escort_exit)
             self._group.clear()
-            # SMART RETURN: scan for hotspot from current position first.
-            # Don't walk back to territory center if there's a hotspot to respond to.
-            # _find_hotspot scans the whole territory regardless of guide position,
-            # so being at the center provides no scanning advantage.
-            self._phase = self.RETURNING
-            fg = getattr(self, "_fire_grid", None)
-            sg = getattr(self, "_smoke_grid", None)
-            danger = self._build_solo_danger_grid(fg, sg)
-            self._waypoints = bfs_path(env, self.pos, self._home_pos, fire_grid=danger)
+            # Release blackboard claim — escort complete
+            self._blackboard.release(self._guide_id)
+            # Scan immediately from current position (no walking "home")
+            self._phase = self.SCANNING
+            self.vel = np.zeros(2)
 
     def _do_returning(self, env, smoke=None, civilians=None):
-        """Return to territory center. Identical danger logic to Sweeper:
-        if smoke/fire threatens group members, emergency escort."""
+        """Return phase — scan for new hotspots while moving.
+        If no waypoints, transition directly to SCANNING.
+        Danger logic: if smoke/fire threatens group members, emergency escort."""
         if not smoke or not civilians:
             if not self._waypoints:
                 self._phase = self.SCANNING
@@ -2251,11 +2264,13 @@ class RouterGuide(Guide):
             return
 
         if not self._waypoints:
+            # No destination — transition to scanning from current position
+            self._blackboard.release(self._guide_id)
             self._phase = self.SCANNING
             self.vel = np.zeros(2)
         else:
             self._follow_path(env)
-            # Recruit while walking home
+            # Recruit while moving
             self._recruit_nearby(env, smoke, civilians)
             # Only divert to escort if we have a decent group (min threshold)
             if len(self._group) >= self._min_group:
@@ -2270,6 +2285,8 @@ class RouterGuide(Guide):
             Uses density-based spatial clustering to identify civilian groups.
             Finds natural clusters of arbitrary shape without boundary artifacts.
             Parameters: epsilon = 3 cells (~9m, room-sized), min_points = 3.
+            Global scanning — no territory filter. Blackboard coordination
+            prevents multiple Routers claiming the same hotspot.
 
         Phase 2 — Individual civilian search (fallback):
             When DBSCAN yields no clusters for N consecutive scans, the
@@ -2278,20 +2295,18 @@ class RouterGuide(Guide):
             survivors in late-stage evacuation.
 
         Cluster scoring: size × (1 - centroid_smoke × 0.5).
-        Skips targets in fire or heavy smoke (unsafe to reach)."""
+        Skips targets in fire or heavy smoke (unsafe to reach).
+        Skips hotspots already claimed by other Routers (blackboard)."""
         from evacsim.civilian import ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED
 
-        # 1. Filter to civilians needing help, within this guide's territory
-        min_r, max_r, min_c, max_c = self._territory
+        # 1. Filter to civilians needing help — GLOBAL scan (no territory filter)
         candidates = []
         for civ in civilians:
             if civ.state in (ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
-            r, c = env.world_to_grid(civ.pos[0], civ.pos[1])
-            if min_r <= r < max_r and min_c <= c < max_c:
-                candidates.append(civ)
+            candidates.append(civ)
 
         if not candidates:
             return None
@@ -2324,6 +2339,12 @@ class RouterGuide(Guide):
                 if sg is not None and sg[cr, cc] > smoke_limit:
                     continue
 
+                # Blackboard: skip hotspots already claimed by other Routers
+                if self._blackboard.is_claimed(
+                    [cx, cy], self._tick, exclude_guide=self._guide_id
+                ):
+                    continue
+
                 size = len(cluster_indices)
                 centroid_smoke = smoke.get_density_at(cx, cy) if smoke else 0
                 score = size * (1.0 - centroid_smoke * 0.5)
@@ -2334,6 +2355,8 @@ class RouterGuide(Guide):
 
             if best_pos is not None:
                 self._no_cluster_count = 0  # Reset fallback counter
+                # Claim this hotspot on the blackboard
+                self._blackboard.claim(self._guide_id, best_pos, self._tick)
                 return self._snap_to_walkable(env, best_pos)
 
         # No clusters found — increment fallback counter
@@ -2625,6 +2648,8 @@ class RouterGuide(Guide):
                 civ.assigned_guide = None
                 civ.state = WANDERING
         self._group.clear()
+        # Release blackboard claim (guide died or self-evacuating)
+        self._blackboard.release(self._guide_id)
 
     def _clean_group(self):
         from evacsim.civilian import ESCAPED, DEAD
@@ -2633,36 +2658,20 @@ class RouterGuide(Guide):
 
 
 def spawn_router_guides(env, n_guides, speed=2.0, seed=77, n_civilians=100):
-    """Spawn router guides at exits, each assigned to a territory."""
+    """Spawn router guides at exits with shared blackboard coordination.
+
+    No territory assignment — Routers scan globally and coordinate via
+    blackboard to avoid claiming the same hotspot. Each Router spawns
+    at a different exit for spatial distribution."""
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
-    rows, cols = env.grid.shape
-    mid_r, mid_c = rows // 2, cols // 2
 
-    if n_guides == 1:
-        territories = [(0, rows, 0, cols)]
-    elif n_guides == 2:
-        territories = [(0, mid_r, 0, cols), (mid_r, rows, 0, cols)]
-    elif n_guides <= 4:
-        territories = [
-            (0, mid_r, 0, mid_c),
-            (0, mid_r, mid_c, cols),
-            (mid_r, rows, 0, mid_c),
-            (mid_r, rows, mid_c, cols),
-        ]
-    else:
-        base = [
-            (0, mid_r, 0, mid_c),
-            (0, mid_r, mid_c, cols),
-            (mid_r, rows, 0, mid_c),
-            (mid_r, rows, mid_c, cols),
-        ]
-        territories = [base[i % 4] for i in range(n_guides)]
+    # Shared blackboard for all Routers in this simulation
+    blackboard = RouterBlackboard()
 
     guides = []
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
-        t = territories[i] if i < len(territories) else territories[0]
-        guides.append(RouterGuide(ex, ey, speed, env, rng, territory_bounds=t,
+        guides.append(RouterGuide(ex, ey, speed, env, rng, blackboard=blackboard,
                                   n_civilians=n_civilians, n_guides=n_guides))
     return guides
