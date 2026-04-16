@@ -408,6 +408,7 @@ class Guide:
         # Self-evacuation state
         self._self_evacuating = False
         self._escape_waypoints = []
+        self.escaped = False  # True if guide successfully reached an exit
 
         # Which exit this guide is assigned to
         self.assigned_exit = None
@@ -483,6 +484,7 @@ class Guide:
             dist = np.sqrt((self.pos[0] - ex) ** 2 + (self.pos[1] - ey) ** 2)
             if dist < env.cell_size:
                 self.alive = False  # Guide escaped (remove from simulation)
+                self.escaped = True  # Distinguish escaped from killed
                 return True
 
         # Follow escape waypoints
@@ -1867,9 +1869,32 @@ class RouterGuide(Guide):
         elif len(self._group) >= self._min_group:
             self._start_escort(env, smoke, civilians)
         elif not self._waypoints:
-            # No hotspot, no group — stay in SCANNING, will rescan next eval cycle.
-            # No need to walk "home" — global scanning works from any position.
-            self.vel = np.zeros(2)
+            # No hotspot found. Two cases to handle:
+            # 1) Safety net: if we somehow still have a group here, escort
+            #    them (shouldn't happen after the _do_collecting fix, but
+            #    guard anyway — NEVER leave civilians attached to an idle guide).
+            # 2) Mission complete: if no civilian anywhere needs help,
+            #    self-evacuate (walk to nearest exit and leave the building).
+            from evacsim.civilian import (
+                IDLE, REACTING, WANDERING, FOLLOWING, FLEEING_ROOM,
+                WALL_FOLLOWING,
+            )
+            NEEDS_HELP = (IDLE, REACTING, WANDERING, FOLLOWING,
+                          FLEEING_ROOM, WALL_FOLLOWING)
+
+            # Safety net: if any civilians are still attached to this guide,
+            # escort them to an exit rather than leave them as passengers.
+            if self._group:
+                self._start_escort(env, smoke, civilians)
+                return
+
+            any_needs_help = any(c.state in NEEDS_HELP for c in civilians)
+            if not any_needs_help:
+                # Mission complete — self-evacuate through nearest exit
+                self._start_self_evacuation(env)
+            else:
+                # Still someone to help but no cluster — stay put, rescan next cycle.
+                self.vel = np.zeros(2)
 
     def _do_responding(self, env, smoke=None, civilians=None):
         # max_group reached while walking to hotspot → escort immediately
@@ -2002,14 +2027,17 @@ class RouterGuide(Guide):
                     # Small group — check if anyone nearby is worth waiting for
                     recruitable = self._count_recruitable(env, smoke, civilians)
                     if recruitable == 0:
-                        # Nobody nearby — scan for another hotspot instead of wasting a trip
-                        self._phase = self.SCANNING
-                        self.vel = np.zeros(2)
+                        # Nobody nearby — escort what we have. Duty of care
+                        # over efficiency: never leave civilians as passengers
+                        # waiting for more. Real fire marshals escort every
+                        # person they've committed to, regardless of group size.
+                        self._start_escort(env, smoke, civilians)
                     # else: keep collecting (reset wait timer for one more round)
-                    # Don't reset indefinitely — if still small after second wait, move on
+                    # Don't reset indefinitely — if still small after second wait, escort
                     elif self._collect_wait >= self._max_collect_wait * 2:
-                        self._phase = self.SCANNING
-                        self.vel = np.zeros(2)
+                        # Still can't reach min_group after two waits — escort
+                        # what we have rather than hold them longer.
+                        self._start_escort(env, smoke, civilians)
             else:
                 # No civilians left at collection point — rescan immediately
                 self._blackboard.release(self._guide_id)
@@ -2090,7 +2118,20 @@ class RouterGuide(Guide):
         # Re-evaluate exit every eval_interval ticks during escort.
         # If a significantly better exit appears (>30% better score),
         # switch target and recompute Dijkstra path.
-        if self._eval_counter == 0 and self._escort_exit is not None:
+        # COMMITMENT ZONE: if already close to current exit, do not switch —
+        # civilians in FOLLOWING_GUIDE state pass through exits without
+        # escaping (wrong state), so switching near the exit causes them to
+        # walk past and take extra smoke damage heading to a new exit.
+        near_current_exit = (
+            self._escort_exit is not None
+            and np.linalg.norm(self.pos - np.array(self._escort_exit))
+                < env.cell_size * 5
+        )
+        if (
+            self._eval_counter == 0
+            and self._escort_exit is not None
+            and not near_current_exit
+        ):
             fg = getattr(self, "_fire_grid", None)
             sg = getattr(self, "_smoke_grid", None)
             # Score current exit

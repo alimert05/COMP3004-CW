@@ -183,7 +183,10 @@ class Simulation:
         result["n_civilians"] = self.config.n_civilians
         result["seed"] = self.config.seed
         result["n_guides"] = len(self.guides)
-        result["guides_survived"] = sum(1 for g in self.guides if g.alive)
+        # "Survived" = didn't die in fire (either still alive OR safely escaped)
+        result["guides_survived"] = sum(
+            1 for g in self.guides if g.alive or getattr(g, "escaped", False)
+        )
 
         return result
 
