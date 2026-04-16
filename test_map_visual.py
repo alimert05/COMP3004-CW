@@ -107,9 +107,11 @@ if GUIDES_ENABLED:
     if GUIDE_POLICY == "beacon":
         guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
     elif GUIDE_POLICY == "sweeper":
-        guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77)
+        guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77,
+                                      n_civilians=CIVILIAN_NUMBER)
     elif GUIDE_POLICY == "router":
-        guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77)
+        guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77,
+                                     n_civilians=CIVILIAN_NUMBER)
 
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)

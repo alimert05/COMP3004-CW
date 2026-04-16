@@ -57,12 +57,14 @@ class Simulation:
         elif config.guide_policy == "sweeper":
             self.guides = spawn_sweeper_guides(
                 self.env, n_guides=n_guides,
-                speed=config.guide_speed, seed=config.seed + 200
+                speed=config.guide_speed, seed=config.seed + 200,
+                n_civilians=config.n_civilians
             )
         elif config.guide_policy == "router":
             self.guides = spawn_router_guides(
                 self.env, n_guides=n_guides,
-                speed=config.guide_speed, seed=config.seed + 200
+                speed=config.guide_speed, seed=config.seed + 200,
+                n_civilians=config.n_civilians
             )
         # "none" → empty list
 

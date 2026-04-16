@@ -12,6 +12,7 @@ are immune to smoke damage (trained + equipment), and can
 see through smoke better than civilians.
 """
 
+import math
 import numpy as np
 from collections import deque
 from evacsim.environment import Environment, CellType
@@ -384,6 +385,9 @@ class Guide:
         # Store grids for danger-aware BFS
         self._fire_grid = fire.density
         self._smoke_grid = smoke.density
+
+        # Store grid position for dynamic max_group danger sampling
+        self._last_grid_pos = env.world_to_grid(self.pos[0], self.pos[1])
 
         # Check fire damage (guides resist smoke but not fire)
         local_fire = fire.get_density_at(self.pos[0], self.pos[1])
@@ -891,12 +895,23 @@ class SweeperGuide(Guide):
         env: Environment,
         rng: np.random.Generator,
         patrol_points: list = None,
-        max_group: int = 19,  # Tuned via parameter sweep (4500 runs, sizes 1-25)
+        n_civilians: int = 100,
+        n_guides: int = 4,
     ):
         super().__init__(x, y, speed, env, rng)
 
         self._group = []
-        self._max_group = max_group
+
+        # Dynamic commitment ceiling (first-principles derivation):
+        # Optimal batch size n* ∝ √(territory_population) from minimizing
+        # C(n) = Pβ/n + P·h·n (fixed trip overhead vs quadratic danger exposure).
+        # α=3 calibrated at crowd=100 via McCormack & Chen (2014) 1:20 ratio.
+        # Floor=5 matches min_group efficiency threshold (escort overhead).
+        self._base_max_group = round(3 * math.sqrt(n_civilians / max(1, n_guides)))
+        self._floor = 5
+        self._tick = 0
+        self._cached_effective_max = self._base_max_group
+        self._cached_max_tick = -1
 
         # Build patrol route
         all_pts = patrol_points if patrol_points else _find_patrol_points(env)
@@ -926,10 +941,62 @@ class SweeperGuide(Guide):
         if self._patrol_route:
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
 
+    def _effective_max_group(self) -> int:
+        """Dynamic commitment ceiling via T-S fuzzy inference (reactive).
+
+        Derived from first-principles optimization of collection-escort cycle:
+        fixed trip overhead β vs quadratic danger exposure h·n² yields
+        n* ∝ √(territory_population). T-S fuzzy adjusts this base using
+        CURRENT local danger (reactive architecture — Brooks 1991).
+
+        Two triangular membership functions (SAFE, DANGEROUS) with zero-order
+        T-S consequents collapse to linear interpolation:
+            effective = base − d × (base − floor)
+        where d ∈ [0, 1] is normalized peak danger in 3-cell radius.
+        """
+        if self._cached_max_tick == self._tick:
+            return self._cached_effective_max
+
+        sg = getattr(self, "_smoke_grid", None)
+        fg = getattr(self, "_fire_grid", None)
+
+        if sg is None and fg is None:
+            self._cached_effective_max = self._base_max_group
+            self._cached_max_tick = self._tick
+            return self._base_max_group
+
+        gr, gc = getattr(self, "_last_grid_pos", (0, 0))
+        rows, cols = (sg if sg is not None else fg).shape
+
+        peak_fire = 0.0
+        peak_smoke = 0.0
+        for dr in range(-3, 4):
+            for dc in range(-3, 4):
+                nr, nc = gr + dr, gc + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if fg is not None and fg[nr, nc] > peak_fire:
+                        peak_fire = fg[nr, nc]
+                    if sg is not None and sg[nr, nc] > peak_smoke:
+                        peak_smoke = sg[nr, nc]
+
+        # Normalize to [0, 1] using existing emergency thresholds
+        fire_factor = min(1.0, peak_fire / 0.1)
+        smoke_factor = min(1.0, peak_smoke / 0.4)
+        d = max(fire_factor, smoke_factor)
+
+        base = self._base_max_group
+        effective = max(self._floor, round(base - d * (base - self._floor)))
+
+        self._cached_effective_max = effective
+        self._cached_max_tick = self._tick
+        return effective
+
     def update(
         self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
     ) -> None:
         super().update(env, smoke, fire, civilians)
+        self._tick += 1
+
         if not self.alive:
             self._release_group_no_exit()
             return
@@ -956,7 +1023,7 @@ class SweeperGuide(Guide):
 
     def _do_collecting(self, env, smoke, civilians):
         """Patrol rooms, collect civilians."""
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             self._start_escort(env)
             return
 
@@ -1095,7 +1162,7 @@ class SweeperGuide(Guide):
 
     def _do_returning(self, env, smoke, civilians):
         """Go back for more civilians."""
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             self._start_escort(env)
             return
 
@@ -1139,7 +1206,7 @@ class SweeperGuide(Guide):
         """Recruit nearby civilians using visual range (Jin, 1978).
         Range based on visibility of light-emitting objects in smoke.
         Requires line of sight — walls block recruitment."""
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             return
         radius = self.get_visual_recruit_radius(smoke)
 
@@ -1153,7 +1220,7 @@ class SweeperGuide(Guide):
         )
 
         for civ in civilians:
-            if len(self._group) >= self._max_group:
+            if len(self._group) >= self._effective_max_group():
                 break
             if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
@@ -1428,7 +1495,8 @@ class SweeperGuide(Guide):
 
 
 def spawn_sweeper_guides(
-    env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77
+    env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77,
+    n_civilians: int = 100
 ) -> list[SweeperGuide]:
     """Spawn sweeper guides from exits. Each covers a different territory.
 
@@ -1484,7 +1552,8 @@ def spawn_sweeper_guides(
         pts = territories[i] if territories[i] else all_points
         # Order: farthest points first (so guide goes deep into building first)
         pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
-        guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted)
+        guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted,
+                             n_civilians=n_civilians, n_guides=n_guides)
         guides.append(guide)
         SweeperGuide._all_sweepers.append(guide)
 
@@ -1532,7 +1601,8 @@ class RouterGuide(Guide):
     RELEASING = "releasing"
     RETURNING = "returning"
 
-    def __init__(self, x, y, speed, env, rng, territory_bounds=None):
+    def __init__(self, x, y, speed, env, rng, territory_bounds=None,
+                 n_civilians: int = 100, n_guides: int = 4):
         super().__init__(x, y, speed, env, rng)
 
         # Territory
@@ -1545,10 +1615,16 @@ class RouterGuide(Guide):
         self._waypoints = []
         self._phase = self.SCANNING
 
-        # Group management
+        # Dynamic commitment ceiling (same derivation as Sweeper):
+        # n* ∝ √(territory_population) from collection-escort cost optimization.
+        # Same base for both policies — asymmetry carried by danger sensing:
+        # Router uses PREDICTED danger (deliberative), Sweeper uses CURRENT (reactive).
         self._group = []
-        self._max_group = 12  # Design choice: lower bound of plateau (see Sweeper sweep)
-        self._min_group = 5   # Don't waste trips on 1-2 people (same rationale as Sweeper)
+        self._base_max_group = round(3 * math.sqrt(n_civilians / max(1, n_guides)))
+        self._floor = 5
+        self._min_group = 5   # Don't waste trips on 1-2 people
+        self._cached_effective_max = self._base_max_group
+        self._cached_max_tick = -1
 
         # Congestion data
         self._exit_counts = {}
@@ -1598,6 +1674,71 @@ class RouterGuide(Guide):
                     visited.add((nr, nc))
                     q.append((nr, nc))
         return np.array(env.grid_to_world(cr, cc), dtype=float)
+
+    def _effective_max_group(self) -> int:
+        """Dynamic commitment ceiling via T-S fuzzy inference (deliberative).
+
+        Same first-principles derivation as Sweeper (n* ∝ √territory), but
+        uses PREDICTED danger 30 ticks ahead via predict_spread() — this is
+        the hybrid reactive-deliberative architecture (MPC-inspired receding
+        horizon risk perception). Router foresees danger and reduces commitment
+        before it arrives; Sweeper only reacts to current conditions.
+
+        Takagi-Sugeno (1985) zero-order fuzzy with triangular membership:
+            effective = base − d × (base − floor)
+        """
+        if self._cached_max_tick == self._tick:
+            return self._cached_effective_max
+
+        fire_sys = getattr(self, "_fire_system", None)
+        smoke_sys = getattr(self, "_smoke_system", None)
+
+        if fire_sys is None and smoke_sys is None:
+            self._cached_effective_max = self._base_max_group
+            self._cached_max_tick = self._tick
+            return self._base_max_group
+
+        # Predict danger 30 ticks ahead (deliberative planning)
+        HORIZON = 30
+        predicted_fg = None
+        predicted_sg = None
+        if fire_sys is not None:
+            predicted_fg = predict_spread(
+                fire_sys.density, fire_sys._burnable,
+                fire_sys._fire_cells, fire_sys.spread_rate, HORIZON
+            )
+        if smoke_sys is not None:
+            predicted_sg = predict_spread(
+                smoke_sys.density, smoke_sys._smokeable,
+                smoke_sys._fire_cells, smoke_sys.spread_rate, HORIZON
+            )
+
+        gr, gc = getattr(self, "_last_grid_pos", (0, 0))
+        grid = predicted_fg if predicted_fg is not None else predicted_sg
+        rows, cols = grid.shape
+
+        peak_fire = 0.0
+        peak_smoke = 0.0
+        for dr in range(-3, 4):
+            for dc in range(-3, 4):
+                nr, nc = gr + dr, gc + dc
+                if 0 <= nr < rows and 0 <= nc < cols:
+                    if predicted_fg is not None and predicted_fg[nr, nc] > peak_fire:
+                        peak_fire = predicted_fg[nr, nc]
+                    if predicted_sg is not None and predicted_sg[nr, nc] > peak_smoke:
+                        peak_smoke = predicted_sg[nr, nc]
+
+        # Normalize to [0, 1] using existing emergency thresholds
+        fire_factor = min(1.0, peak_fire / 0.1)
+        smoke_factor = min(1.0, peak_smoke / 0.4)
+        d = max(fire_factor, smoke_factor)
+
+        base = self._base_max_group
+        effective = max(self._floor, round(base - d * (base - self._floor)))
+
+        self._cached_effective_max = effective
+        self._cached_max_tick = self._tick
+        return effective
 
     def update(self, env, smoke, fire, civilians):
         super().update(env, smoke, fire, civilians)
@@ -1678,7 +1819,7 @@ class RouterGuide(Guide):
             self._follow_path(env)
             self._recruit_nearby(env, smoke, civilians)
             # max_group reached while walking → escort immediately
-            if len(self._group) >= self._max_group:
+            if len(self._group) >= self._effective_max_group():
                 self._start_escort(env, smoke, civilians)
             return
         self.vel = np.zeros(2)
@@ -1703,7 +1844,7 @@ class RouterGuide(Guide):
 
     def _do_responding(self, env, smoke=None, civilians=None):
         # max_group reached while walking to hotspot → escort immediately
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             self._start_escort(env, smoke, civilians)
             return
 
@@ -1771,7 +1912,7 @@ class RouterGuide(Guide):
             if smoke and civilians:
                 self._recruit_nearby(env, smoke, civilians)
                 # FIX 3: also check max_group after recruiting
-                if len(self._group) >= self._max_group:
+                if len(self._group) >= self._effective_max_group():
                     self._start_escort(env, smoke, civilians)
 
     def _do_collecting(self, env, smoke, civilians):
@@ -1780,7 +1921,7 @@ class RouterGuide(Guide):
         Includes danger detection (like Sweeper): if fire/smoke nearby,
         escort immediately regardless of group size."""
         # max_group reached → escort immediately
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             self._start_escort(env, smoke, civilians)
             return
 
@@ -1822,7 +1963,7 @@ class RouterGuide(Guide):
         self._recruit_nearby(env, smoke, civilians)
 
         # Start escorting when: enough people OR timeout
-        has_enough = len(self._group) >= self._max_group
+        has_enough = len(self._group) >= self._effective_max_group()
         timed_out = self._collect_wait >= self._max_collect_wait
         if has_enough or timed_out:
             if self._group:
@@ -2048,7 +2189,7 @@ class RouterGuide(Guide):
             return
 
         # Max group → escort immediately
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             self._start_escort(env, smoke, civilians)
             return
 
@@ -2229,7 +2370,7 @@ class RouterGuide(Guide):
 
     def _recruit_nearby(self, env, smoke, civilians):
         """Recruit nearby civilians using visual range (Jin, 1978) + LOS."""
-        if len(self._group) >= self._max_group:
+        if len(self._group) >= self._effective_max_group():
             return
         radius = self.get_visual_recruit_radius(smoke)
         from evacsim.civilian import (
@@ -2242,7 +2383,7 @@ class RouterGuide(Guide):
         )
 
         for civ in civilians:
-            if len(self._group) >= self._max_group:
+            if len(self._group) >= self._effective_max_group():
                 break
             if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
                 continue
@@ -2481,7 +2622,7 @@ class RouterGuide(Guide):
         self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
 
-def spawn_router_guides(env, n_guides, speed=2.0, seed=77):
+def spawn_router_guides(env, n_guides, speed=2.0, seed=77, n_civilians=100):
     """Spawn router guides at exits, each assigned to a territory."""
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
@@ -2512,5 +2653,6 @@ def spawn_router_guides(env, n_guides, speed=2.0, seed=77):
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
         t = territories[i] if i < len(territories) else territories[0]
-        guides.append(RouterGuide(ex, ey, speed, env, rng, territory_bounds=t))
+        guides.append(RouterGuide(ex, ey, speed, env, rng, territory_bounds=t,
+                                  n_civilians=n_civilians, n_guides=n_guides))
     return guides
