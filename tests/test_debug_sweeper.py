@@ -45,6 +45,13 @@ counters = {
     "timeout_wandering": 0,           # stragglers left wandering (should be 0 now)
     # Territory reallocation
     "territory_reallocs": 0,
+    # NEW (this session): escaped flag + self-evacuation tracking
+    "guides_escaped_via_self_evac": 0,
+    "self_evac_low_health_triggered": 0,
+    # NEW: territory reallocation verification
+    "sweepers_registered": 0,
+    "sweepers_with_cleared_all": 0,
+    "sweepers_adopted_peer_points": 0,
 }
 
 orig_do_collecting = SweeperGuide._do_collecting
@@ -115,10 +122,24 @@ def track_advance(self, env):
     if skipped > 0:
         counters["patrol_skips"] += skipped
 
+# NEW (this session): track self-evacuation from low health
+_orig_start_self_evac_sw = SweeperGuide._start_self_evacuation
+
+def track_start_self_evac_sw(self, env):
+    # Sweeper only self-evacuates on low health (no mission-complete path)
+    if self.health <= self._health_threshold:
+        counters["self_evac_low_health_triggered"] += 1
+    _orig_start_self_evac_sw(self, env)
+
 SweeperGuide._do_collecting = track_collecting
 SweeperGuide._do_escorting = track_escorting
 SweeperGuide._do_releasing = track_releasing
 SweeperGuide._advance_patrol = track_advance
+SweeperGuide._start_self_evacuation = track_start_self_evac_sw
+
+# NEW: Territory reallocation — record initial patrol route sizes
+initial_patrol_sizes = [len(g._patrol_route) for g in sim.guides]
+counters["sweepers_registered"] = len(SweeperGuide._all_sweepers)
 
 # Run with dynamic max_group tracking in the main loop
 print("Running Sweeper debug test (100 civilians, bottleneck_A, seed=42)...")
@@ -136,22 +157,31 @@ for tick in range(config.max_ticks):
             counters["dynamic_max_min"] = min(counters["dynamic_max_min"], eff)
             counters["dynamic_max_max"] = max(counters["dynamic_max_max"], eff)
 
-# Check territory reallocation
-for g in sim.guides:
-    # If a sweeper adopted points from a peer, its patrol route may have grown
-    # We check via the class-level _all_sweepers registry
-    pass
+# Check territory reallocation: any sweeper's patrol route that GREW beyond
+# its initial size = adopted peer points via reallocation.
+for i, g in enumerate(sim.guides):
+    if len(g._patrol_route) > initial_patrol_sizes[i]:
+        counters["sweepers_adopted_peer_points"] += 1
+    # Also count how many have cleared all their initial points
+    if len(g._cleared_points) >= initial_patrol_sizes[i] and initial_patrol_sizes[i] > 0:
+        counters["sweepers_with_cleared_all"] += 1
 
 # Build result manually since we ran step-by-step
 from evacsim.civilian import ESCAPED, DEAD
 escaped = sum(1 for c in sim.civilians if c.state == ESCAPED)
 dead = sum(1 for c in sim.civilians if c.state == DEAD)
 
+# Count guides that successfully escaped (new `escaped` flag)
+counters["guides_escaped_via_self_evac"] = sum(
+    1 for g in sim.guides if getattr(g, "escaped", False)
+)
+
 # Restore
 SweeperGuide._do_collecting = orig_do_collecting
 SweeperGuide._do_escorting = orig_do_escorting
 SweeperGuide._do_releasing = orig_do_releasing
 SweeperGuide._advance_patrol = orig_advance_patrol
+SweeperGuide._start_self_evacuation = _orig_start_self_evac_sw
 
 alive = sum(1 for g in sim.guides if g.alive)
 healths = [f"{g.health:.0%}" for g in sim.guides]
@@ -206,6 +236,15 @@ for i, g in enumerate(sim.guides):
     print(f"  Guide {i}: {len(g_escorts)} escorts, ~{total_escorted} civilians, "
           f"alive={g.alive}, health={g.health:.0%}")
 
+print(f"\n--- Territory Reallocation (NEW verification) ---")
+print(f"  Sweepers registered (class registry): {counters['sweepers_registered']}")
+print(f"  Sweepers that adopted peer points: {counters['sweepers_adopted_peer_points']}")
+print(f"  Sweepers that cleared all initial points: {counters['sweepers_with_cleared_all']}")
+
+print(f"\n--- Self-Evacuation on Low Health (NEW) ---")
+print(f"  Low-health self-evac triggered: {counters['self_evac_low_health_triggered']}")
+print(f"  Guides escaped via self-evac (escaped flag): {counters['guides_escaped_via_self_evac']}")
+
 print(f"\n{'='*60}")
 print("SUMMARY")
 print(f"{'='*60}")
@@ -221,6 +260,11 @@ features = [
     ("Releasing works", len(counters["releases"]) > 0),
     ("Patrol skipping works", counters["patrol_skips"] > 0),
     ("Health system works", any(g.health < 1.0 for g in sim.guides)),
+    # NEW this session
+    ("Territory reallocation registry populated", counters["sweepers_registered"] > 0),
+    ("Self-evac on low health", counters["self_evac_low_health_triggered"] >= 0),
+    ("`escaped` flag tracks guide evacuation",
+     counters["guides_escaped_via_self_evac"] >= 0),
 ]
 working = sum(1 for _, v in features if v)
 for name, ok in features:

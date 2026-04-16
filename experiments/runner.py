@@ -1,16 +1,23 @@
 """
-Experiment runner — 5,400 headless simulation runs.
+Experiment runner — 14,400 headless simulation runs.
 
-Design (from plan):
-  3 maps × 5 fire positions × 4 policies × 3 crowd sizes × 30 trials = 5,400 runs
+Factorial design:
+  8 maps × 5 fire positions × 4 policies × 3 crowd sizes × 30 trials = 14,400 runs
 
-Uses Python multiprocessing to utilize all CPU cores.
+Maps: 4 bottleneck (A/B/C/D) + 4 open-plan (A/B/C/D), all 36×80.
+Crowd sizes: 50 (well-supplied), 100 (near McCormack 1:20 optimum), 150 (stressed).
+Fire positions: center + 4 corners.
+Policies: none (baseline), beacon (passive), sweeper (reactive), router (hybrid).
+
+Uses Python multiprocessing to utilise all CPU cores.
 Saves results to CSV for analysis.
 
 Usage:
-    python -m experiments.runner                  # Full 5,400 runs
-    python -m experiments.runner --quick           # Quick test (180 runs)
-    python -m experiments.runner --policy beacon   # Single policy only
+    python -m experiments.runner                  # Full 14,400 runs
+    python -m experiments.runner --quick          # Quick test (60 runs)
+    python -m experiments.runner --medium         # Medium test (600 runs)
+    python -m experiments.runner --policy beacon  # Single policy only
+    python -m experiments.runner --map maps/bottleneck_A.txt  # Single map
 """
 
 import os
@@ -31,12 +38,16 @@ from evacsim.simulation import run_single
 # ── Experimental design ──────────────────────────────────────────────
 
 MAPS = [
-    "maps/bottleneck_A.txt",
-    "maps/bottleneck_B.txt",
-    "maps/bottleneck_C.txt",
-    "maps/open_plan_A.txt",
-    "maps/open_plan_B.txt",
-    "maps/open_plan_C.txt",
+    # Bottleneck maps (4): rooms with narrow doorways
+    "maps/bottleneck_A.txt",   # Grid of small rooms, 1-cell doorways
+    "maps/bottleneck_B.txt",   # Wider 3-cell corridors, asymmetric exits
+    "maps/bottleneck_C.txt",   # Asymmetric — all 4 exits on right wall
+    "maps/bottleneck_D.txt",   # Hospital corridor, 2-cell central aisle
+    # Open-plan maps (4): large open spaces
+    "maps/open_plan_A.txt",    # Open warehouse with scattered pillars
+    "maps/open_plan_B.txt",    # Cubicle partitions, lane-like
+    "maps/open_plan_C.txt",    # Funnel — all exits clustered at bottom
+    "maps/open_plan_D.txt",    # Two zones connected by narrow bridge
 ]
 
 FIRE_POSITIONS = [
@@ -49,7 +60,9 @@ FIRE_POSITIONS = [
 
 POLICIES = ["none", "beacon", "sweeper", "router"]
 
-CROWD_SIZES = [20, 50, 100]
+# Updated from [20, 50, 100]: 20 was too sparse (policy differences compressed)
+# New range: 50 (1:12.5 per guide) → 100 (near McCormack 1:20) → 150 (1:37.5 stressed)
+CROWD_SIZES = [50, 100, 150]
 
 N_TRIALS = 30
 
@@ -163,10 +176,12 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
 
 def main():
     parser = argparse.ArgumentParser(description="Run evacuation experiments")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Smoke test: 1 map, 1 fire, 4 policies, 1 size, 1 trial = 4 runs")
     parser.add_argument("--quick", action="store_true",
-                        help="Quick test: 1 map, 1 fire pos, 4 policies, 3 sizes, 5 trials = 60 runs")
+                        help="Quick: 1 map, 1 fire, 4 policies, 3 sizes, 5 trials = 60 runs")
     parser.add_argument("--medium", action="store_true",
-                        help="Medium: 1 map, 5 fire pos, 4 policies, 3 sizes, 10 trials = 600 runs")
+                        help="Medium: 1 map, 5 fire, 4 policies, 3 sizes, 10 trials = 600 runs")
     parser.add_argument("--policy", type=str, default=None,
                         help="Run single policy only")
     parser.add_argument("--map", type=str, default=None,
@@ -177,7 +192,16 @@ def main():
                         help="Output CSV file")
     args = parser.parse_args()
 
-    if args.quick:
+    if args.smoke:
+        configs = build_configs(
+            maps=["maps/bottleneck_A.txt"],
+            fire_positions=["center"],
+            policies=POLICIES,
+            crowd_sizes=[100],
+            n_trials=1,
+        )
+        print(f"SMOKE TEST: {len(configs)} runs (sanity check — ~15 seconds)")
+    elif args.quick:
         configs = build_configs(
             maps=["maps/bottleneck_A.txt"],
             fire_positions=["center"],

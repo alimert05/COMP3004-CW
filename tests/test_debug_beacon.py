@@ -127,6 +127,13 @@ for i, g in enumerate(sim.guides):
           f"self_evac={g._self_evacuating}, in_pos={g._in_position}")
 
 # Verify broadcast radius works
+print(f"\n--- Guide Evacuation (NEW: escaped flag) ---")
+guides_escaped = sum(1 for g in sim.guides if getattr(g, "escaped", False))
+guides_killed = sum(1 for g in sim.guides if not g.alive and not getattr(g, "escaped", False))
+print(f"  Guides that escaped successfully: {guides_escaped}/{len(sim.guides)}")
+print(f"  Guides killed in fire: {guides_killed}/{len(sim.guides)}")
+print(f"  Guides still alive (in building): {sum(1 for g in sim.guides if g.alive)}/{len(sim.guides)}")
+
 print(f"\n--- Broadcast Parameters ---")
 from evacsim.smoke import SmokeSystem
 dummy_smoke = sim.smoke
@@ -142,6 +149,12 @@ features = [
     ("Sound broadcast (wakes IDLE)", counters["idle_woken"] > 0),
     ("Exit telling (gives exit info)", counters["exit_told"] > 0),
     ("Health system (takes damage)", any(g.health < 1.0 for g in sim.guides)),
+    # NEW this session
+    ("`escaped` flag distinguishes evacuated vs killed",
+     guides_escaped + guides_killed + sum(1 for g in sim.guides if g.alive)
+     == len(sim.guides)),
 ]
+working = sum(1 for _, v in features if v)
 for name, ok in features:
     print(f"  {'[OK]' if ok else '[FAIL]'} {name}")
+print(f"\n  Features verified: {working}/{len(features)}")
