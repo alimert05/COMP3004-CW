@@ -1139,23 +1139,33 @@ class SweeperGuide(Guide):
             self._follow_path(env)
 
     def _do_releasing(self, env):
-        """Stand at exit — civilians self-release when they spot the exit sign.
-        Guide just waits here as a reference point. After timeout, drop stragglers."""
-        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
+        """Stand at exit and actively direct civilians to exit.
+        Guide verbally tells nearby civilians where the exit is,
+        then gives final directions to stragglers before departing."""
+        from evacsim.civilian import FOLLOWING_GUIDE
 
         self.vel = np.zeros(2)
         self._release_wait += 1
 
-        # Civilians spot the exit themselves (Fix 4 in civilian.py)
-        # and leave the group automatically. We just wait.
-        # _clean_group() in update() removes escaped/dead civilians.
+        # Active release: direct civilians to exit (verbal communication)
+        still = []
+        for civ in self._group:
+            if civ.state != FOLLOWING_GUIDE:
+                continue
+            dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
+            dist_guide = np.linalg.norm(civ.pos - self.pos)
+            if dist_exit < env.cell_size * 5 or dist_guide < env.cell_size * 3:
+                civ._set_exit_target_force(env, self._escort_exit)
+            else:
+                still.append(civ)
+        self._group = still
 
-        # Done waiting? (all self-released OR timeout)
+        # Done waiting? (all released OR timeout)
         if not self._group or self._release_wait >= self._release_max_wait:
+            # Timeout: give stragglers exit target instead of leaving them lost
             for civ in self._group:
                 if civ.state == FOLLOWING_GUIDE:
-                    civ.assigned_guide = None
-                    civ.state = WANDERING
+                    civ._set_exit_target_force(env, self._escort_exit)
             self._group.clear()
             self._phase = self.RETURNING
             self._advance_patrol(env)
@@ -2162,10 +2172,10 @@ class RouterGuide(Guide):
         self._group = still
 
         if not self._group or self._release_wait >= self._release_max_wait:
+            # Timeout: give stragglers exit target instead of leaving them lost
             for civ in self._group:
                 if civ.state == FOLLOWING_GUIDE:
-                    civ.assigned_guide = None
-                    civ.state = WANDERING
+                    civ._set_exit_target_force(env, self._escort_exit)
             self._group.clear()
             # SMART RETURN: scan for hotspot from current position first.
             # Don't walk back to territory center if there's a hotspot to respond to.

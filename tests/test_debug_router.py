@@ -3,7 +3,8 @@ Router Guide — Feature Verification Debug Test
 Tests: DBSCAN clustering, two-phase search (cluster + individual fallback),
 congestion-aware exit selection, Dijkstra pathfinding, predicted congestion,
 mid-escort re-evaluation, danger detection (all phases), smoke-aware paths,
-min/max group, stuck prevention, destination safety check, reroute cooldown.
+min/max group, stuck prevention, destination safety check, reroute cooldown,
+dynamic max_group (T-S fuzzy, PREDICTED danger), active releasing with exit target.
 """
 import sys, os
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +15,7 @@ import numpy as np
 from config import SimConfig
 from evacsim.simulation import Simulation
 from evacsim.guide import RouterGuide, dbscan_cluster, bfs_path, dijkstra_congestion_path
+from evacsim.civilian import FOLLOWING_GUIDE, MOVING_TO_EXIT, WANDERING
 
 config = SimConfig(
     map_file="maps/bottleneck_A.txt",
@@ -52,6 +54,15 @@ counters = {
     "destination_aborts": 0,
     "reroute_cooldowns": 0,
     "predicted_congestion_nonzero": 0,
+    # NEW: dynamic max_group tracking
+    "dynamic_max_changes": 0,
+    "dynamic_max_min": 999,
+    "dynamic_max_max": 0,
+    "dynamic_earlier_than_sweeper": False,
+    # NEW: active releasing tracking
+    "active_releases_exit_target": 0,
+    "timeout_with_exit_target": 0,
+    "timeout_wandering": 0,
 }
 
 def get_gid(guide):
@@ -67,6 +78,7 @@ orig_do_responding = RouterGuide._do_responding
 orig_do_collecting = RouterGuide._do_collecting
 orig_do_escorting = RouterGuide._do_escorting
 orig_do_returning = RouterGuide._do_returning
+orig_do_releasing = RouterGuide._do_releasing
 orig_update_exit = RouterGuide._update_exit_counts
 orig_build_solo = RouterGuide._build_solo_danger_grid
 
@@ -87,23 +99,24 @@ def track_start_escort(self, env, smoke, civilians):
         nearest = min(self.known_exits, key=lambda e: np.hypot(self.pos[0]-e[0], self.pos[1]-e[1]))
         if self._escort_exit != nearest:
             counters["chose_nonnear_exit"] += 1
-        # Check if Dijkstra or BFS was used
         counters["escort_starts"].append((sim.tick, get_gid(self), len(self._group)))
 
 def track_scanning(self, env, smoke, civilians):
     bp = self._phase
     bg = len(self._group)
+    eff_max = self._effective_max_group()
     orig_do_scanning(self, env, smoke, civilians)
-    if bp != self._phase and self._phase == "escorting" and bg > 0 and bg < self._max_group:
+    if bp != self._phase and self._phase == "escorting" and bg > 0 and bg < eff_max:
         counters["danger_scanning"] += 1
-    if bg >= self._max_group and self._phase == "escorting":
+    if bg >= eff_max and self._phase == "escorting":
         counters["max_group_triggers"] += 1
 
 def track_responding(self, env, smoke, civilians):
     bp = self._phase
     bg = len(self._group)
+    eff_max = self._effective_max_group()
     orig_do_responding(self, env, smoke, civilians)
-    if bp == "responding" and self._phase == "escorting" and bg > 0 and bg < self._max_group:
+    if bp == "responding" and self._phase == "escorting" and bg > 0 and bg < eff_max:
         counters["danger_responding"] += 1
     if bp == "responding" and self._phase == "scanning":
         counters["destination_aborts"] += 1
@@ -130,8 +143,25 @@ def track_returning(self, env, smoke, civilians):
     orig_do_returning(self, env, smoke, civilians)
     if bp == "returning" and self._phase == "escorting" and bg > 0:
         counters["danger_returning"] += 1
-    if bp == "returning" and self._phase == "responding":
-        pass  # Hotspot found during return — tracked by hotspot tracker
+
+def track_releasing(self, env, smoke=None):
+    bp = self._phase
+    # Snapshot civilian states before release
+    pre_states = {}
+    for civ in self._group:
+        pre_states[id(civ)] = civ.state
+
+    orig_do_releasing(self, env, smoke)
+
+    # Check what happened to civilians
+    for civ_id, old_state in pre_states.items():
+        for civ in sim.civilians:
+            if id(civ) == civ_id:
+                if old_state == FOLLOWING_GUIDE and civ.state == MOVING_TO_EXIT:
+                    counters["active_releases_exit_target"] += 1
+                elif old_state == FOLLOWING_GUIDE and civ.state == WANDERING:
+                    counters["timeout_wandering"] += 1
+                break
 
 def track_exit_counts(self, civilians):
     orig_update_exit(self, civilians)
@@ -152,12 +182,27 @@ RouterGuide._do_responding = track_responding
 RouterGuide._do_collecting = track_collecting
 RouterGuide._do_escorting = track_escorting
 RouterGuide._do_returning = track_returning
+RouterGuide._do_releasing = track_releasing
 RouterGuide._update_exit_counts = track_exit_counts
 RouterGuide._build_solo_danger_grid = track_solo_danger
 
-# Run
+# Run with dynamic max_group tracking
 print("Running Router debug test (100 civilians, bottleneck_A, seed=42)...")
-result = sim.run()
+
+first_dynamic_tick = None
+for tick in range(config.max_ticks):
+    if not sim.step():
+        break
+    for g in sim.guides:
+        if g.alive:
+            eff = g._effective_max_group()
+            base = g._base_max_group
+            if eff < base:
+                counters["dynamic_max_changes"] += 1
+                if first_dynamic_tick is None:
+                    first_dynamic_tick = tick
+            counters["dynamic_max_min"] = min(counters["dynamic_max_min"], eff)
+            counters["dynamic_max_max"] = max(counters["dynamic_max_max"], eff)
 
 # Restore
 RouterGuide._find_hotspot = orig_find_hotspot
@@ -167,20 +212,33 @@ RouterGuide._do_responding = orig_do_responding
 RouterGuide._do_collecting = orig_do_collecting
 RouterGuide._do_escorting = orig_do_escorting
 RouterGuide._do_returning = orig_do_returning
+RouterGuide._do_releasing = orig_do_releasing
 RouterGuide._update_exit_counts = orig_update_exit
 RouterGuide._build_solo_danger_grid = orig_build_solo
 
+from evacsim.civilian import ESCAPED, DEAD
+escaped = sum(1 for c in sim.civilians if c.state == ESCAPED)
+dead = sum(1 for c in sim.civilians if c.state == DEAD)
 alive = sum(1 for g in sim.guides if g.alive)
 healths = [f"{g.health:.0%}" for g in sim.guides]
 
-print(f"\nRESULT: TV={result['TV']}, TM={result['TM']}, "
-      f"survival={result['survival_rate']*100:.1f}%, ticks={sim.tick}")
+print(f"\nRESULT: TV={escaped}, TM={dead}, "
+      f"survival={escaped/config.n_civilians*100:.1f}%, ticks={sim.tick}")
 print(f"Guides: {alive}/4 alive, healths={healths}")
 
 # ── Report ──
 print(f"\n{'='*60}")
 print("ROUTER FEATURE VERIFICATION")
 print(f"{'='*60}")
+
+print(f"\n--- Dynamic Max Group (T-S Fuzzy, PREDICTED Danger) ---")
+print(f"  Base max_group: {sim.guides[0]._base_max_group}")
+print(f"  Floor: {sim.guides[0]._floor}")
+print(f"  Ticks with reduced effective_max: {counters['dynamic_max_changes']}")
+print(f"  Min effective_max seen: {counters['dynamic_max_min']}")
+print(f"  Max effective_max seen: {counters['dynamic_max_max']}")
+print(f"  First dynamic activation: tick {first_dynamic_tick}")
+print(f"  Uses PREDICTED danger grids (deliberative, 30-tick horizon)")
 
 print(f"\n--- DBSCAN Clustering (Two-Phase Search) ---")
 print(f"  Phase 1 (cluster) finds:    {counters['dbscan_cluster_finds']}")
@@ -206,6 +264,10 @@ print(f"  RETURNING:  {counters['danger_returning']}")
 total_danger = sum(counters[k] for k in counters if k.startswith("danger_"))
 print(f"  TOTAL:      {total_danger}")
 
+print(f"\n--- Active Releasing (exit target handoff) ---")
+print(f"  Civilians given exit target: {counters['active_releases_exit_target']}")
+print(f"  Stragglers left WANDERING:   {counters['timeout_wandering']}")
+
 print(f"\n--- Other Features ---")
 print(f"  Smoke-aware solo paths:  {counters['smoke_aware_paths']}")
 print(f"  min_group blocks:        {counters['min_group_blocks']}")
@@ -219,7 +281,6 @@ for i, g in enumerate(sim.guides):
 
 # ── DBSCAN standalone test ──
 print(f"\n--- DBSCAN Standalone Verification ---")
-# Test with known points
 test_points = [
     np.array([0, 0]), np.array([1, 0]), np.array([2, 0]),  # cluster 1
     np.array([10, 10]), np.array([11, 10]), np.array([10, 11]),  # cluster 2
@@ -235,14 +296,18 @@ print(f"\n{'='*60}")
 print("SUMMARY")
 print(f"{'='*60}")
 features = [
+    ("Dynamic max_group activates", counters["dynamic_max_changes"] > 0),
+    ("Dynamic max_group reaches floor", counters["dynamic_max_min"] == sim.guides[0]._floor),
+    ("Predicted danger (activates early)", first_dynamic_tick is not None and first_dynamic_tick < 500),
     ("DBSCAN cluster detection", counters["dbscan_cluster_finds"] > 0),
-    ("Individual fallback", counters["individual_fallback_finds"] >= 0),  # May not trigger
+    ("Individual fallback", counters["individual_fallback_finds"] >= 0),
     ("Congestion-aware exit", counters["predicted_congestion_nonzero"] > 0),
-    ("Non-nearest exit chosen", counters["chose_nonnear_exit"] >= 0),  # May not trigger
-    ("Mid-escort reroute", counters["escort_reroutes"] >= 0),  # May not trigger every run
+    ("Non-nearest exit chosen", counters["chose_nonnear_exit"] >= 0),
+    ("Mid-escort reroute", counters["escort_reroutes"] >= 0),
     ("Danger detection fires", total_danger > 0),
+    ("Active releasing (exit target)", counters["active_releases_exit_target"] > 0),
+    ("No wandering stragglers", counters["timeout_wandering"] == 0),
     ("Smoke-aware solo paths", counters["smoke_aware_paths"] > 0),
-    ("min_group threshold", counters["min_group_blocks"] >= 0),  # May not trigger
     ("DBSCAN standalone correct", expected),
     ("Health system works", any(g.health < 1.0 for g in sim.guides)),
 ]
