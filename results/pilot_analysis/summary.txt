@@ -5,64 +5,64 @@ Maps: 8 | Policies: 4 | Crowd sizes: 3 | Fire positions: 1
 ======================================================================
 
 -- SURVIVAL RATE BY POLICY (overall) --
-  none      mean=0.349  SD=0.297  95% CI+/-0.069  n=72
-  beacon    mean=0.542  SD=0.294  95% CI+/-0.068  n=72
-  sweeper   mean=0.708  SD=0.220  95% CI+/-0.051  n=72
-  router    mean=0.746  SD=0.214  95% CI+/-0.049  n=72
+  none      mean=0.338  SD=0.310  95% CI+/-0.072  n=72
+  beacon    mean=0.584  SD=0.287  95% CI+/-0.066  n=72
+  sweeper   mean=0.712  SD=0.234  95% CI+/-0.054  n=72
+  router    mean=0.773  SD=0.200  95% CI+/-0.046  n=72
 
 -- ONE-WAY ANOVA RESULTS --
-  survival_rate       F=  35.25  p=2.146e-19  eta2=0.271 (large)  -> SIGNIFICANT
-  MP                  F=   0.18  p=0.9079  eta2=0.002 (negligible)  -> not significant
-  MT                  F=  12.48  p=1.086e-07  eta2=0.116 (medium)  -> SIGNIFICANT
+  survival_rate       F=  39.16  p=3.299e-21  eta2=0.293 (large)  -> SIGNIFICANT
+  MP                  F=   1.82  p=0.1432  eta2=0.019 (small)  -> not significant
+  MT                  F=   9.63  p=4.493e-06  eta2=0.092 (medium)  -> SIGNIFICANT
   guides_survived     F=    inf  p=0  eta2=1.000 (large)  -> SIGNIFICANT
 
 -- TUKEY HSD PAIRWISE COMPARISONS (survival_rate) --
-  beacon   vs none      diff=-0.193  p=0.0001 ***  d=+0.65 (medium)
-  beacon   vs router    diff=+0.204  p=0 ***  d=-0.79 (medium)
-  beacon   vs sweeper   diff=+0.167  p=0.0008 ***  d=-0.64 (medium)
-  none     vs router    diff=+0.397  p=0 ***  d=-1.53 (large)
-  none     vs sweeper   diff=+0.360  p=0 ***  d=-1.38 (large)
-  router   vs sweeper   diff=-0.037  p=0.8236    d=+0.17 (negligible)
+  beacon   vs none      diff=-0.246  p=0 ***  d=+0.82 (large)
+  beacon   vs router    diff=+0.189  p=0.0001 ***  d=-0.76 (medium)
+  beacon   vs sweeper   diff=+0.128  p=0.0187 *  d=-0.49 (small)
+  none     vs router    diff=+0.435  p=0 ***  d=-1.67 (large)
+  none     vs sweeper   diff=+0.374  p=0 ***  d=-1.36 (large)
+  router   vs sweeper   diff=-0.061  p=0.5028    d=+0.28 (small)
 
 -- SURVIVAL BY MAP TYPE x POLICY --
   bottleneck:
-    none      mean=0.157  SD=0.121  95% CI+/-0.040
-    beacon    mean=0.404  SD=0.238  95% CI+/-0.078
-    sweeper   mean=0.606  SD=0.144  95% CI+/-0.047
-    router    mean=0.657  SD=0.178  95% CI+/-0.058
+    none      mean=0.140  SD=0.125  95% CI+/-0.041
+    beacon    mean=0.435  SD=0.223  95% CI+/-0.073
+    sweeper   mean=0.617  SD=0.154  95% CI+/-0.050
+    router    mean=0.678  SD=0.178  95% CI+/-0.058
   open_plan:
-    none      mean=0.541  SD=0.299  95% CI+/-0.098
-    beacon    mean=0.680  SD=0.282  95% CI+/-0.092
-    sweeper   mean=0.811  SD=0.235  95% CI+/-0.077
-    router    mean=0.835  SD=0.212  95% CI+/-0.069
+    none      mean=0.535  SD=0.315  95% CI+/-0.103
+    beacon    mean=0.733  SD=0.268  95% CI+/-0.088
+    sweeper   mean=0.807  SD=0.263  95% CI+/-0.086
+    router    mean=0.867  SD=0.176  95% CI+/-0.057
 
 -- SURVIVAL BY CROWD SIZE x POLICY --
   none:
-    n=50    mean=0.262  SD=0.229  95% CI+/-0.092
-    n=100   mean=0.337  SD=0.295  95% CI+/-0.118
-    n=150   mean=0.448  SD=0.340  95% CI+/-0.136
+    n=50    mean=0.264  SD=0.264  95% CI+/-0.106
+    n=100   mean=0.324  SD=0.311  95% CI+/-0.125
+    n=150   mean=0.424  SD=0.341  95% CI+/-0.137
   beacon:
-    n=50    mean=0.497  SD=0.305  95% CI+/-0.122
-    n=100   mean=0.527  SD=0.312  95% CI+/-0.125
-    n=150   mean=0.601  SD=0.265  95% CI+/-0.106
+    n=50    mean=0.564  SD=0.287  95% CI+/-0.115
+    n=100   mean=0.576  SD=0.298  95% CI+/-0.119
+    n=150   mean=0.611  SD=0.287  95% CI+/-0.115
   sweeper:
-    n=50    mean=0.729  SD=0.205  95% CI+/-0.082
-    n=100   mean=0.697  SD=0.245  95% CI+/-0.098
-    n=150   mean=0.699  SD=0.215  95% CI+/-0.086
+    n=50    mean=0.717  SD=0.231  95% CI+/-0.093
+    n=100   mean=0.712  SD=0.237  95% CI+/-0.095
+    n=150   mean=0.706  SD=0.244  95% CI+/-0.098
   router:
-    n=50    mean=0.755  SD=0.201  95% CI+/-0.081
-    n=100   mean=0.737  SD=0.225  95% CI+/-0.090
-    n=150   mean=0.745  SD=0.224  95% CI+/-0.089
+    n=50    mean=0.784  SD=0.209  95% CI+/-0.084
+    n=100   mean=0.777  SD=0.184  95% CI+/-0.074
+    n=150   mean=0.757  SD=0.213  95% CI+/-0.085
 
 -- BEST POLICY PER MAP (by mean survival) --
-  bottleneck_A: best=router (0.770), worst=none (0.061)
-  bottleneck_B: best=router (0.864), worst=none (0.277)
-  bottleneck_C: best=sweeper (0.481), worst=none (0.169)
-  bottleneck_D: best=router (0.547), worst=none (0.121)
-  open_plan_A: best=router (0.960), worst=none (0.724)
-  open_plan_B: best=sweeper (0.947), worst=none (0.684)
-  open_plan_C: best=router (0.496), worst=none (0.112)
-  open_plan_D: best=router (0.948), worst=none (0.643)
+  bottleneck_A: best=router (0.768), worst=none (0.056)
+  bottleneck_B: best=router (0.891), worst=none (0.275)
+  bottleneck_C: best=router (0.464), worst=none (0.135)
+  bottleneck_D: best=router (0.590), worst=none (0.093)
+  open_plan_A: best=router (0.966), worst=none (0.746)
+  open_plan_B: best=router (0.954), worst=none (0.705)
+  open_plan_C: best=router (0.591), worst=none (0.043)
+  open_plan_D: best=router (0.959), worst=none (0.646)
 
 ======================================================================
 Symbols: * p<0.05   ** p<0.01   *** p<0.001

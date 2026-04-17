@@ -67,6 +67,10 @@ counters = {
     "blackboard_claims": 0,
     "blackboard_claims_respected": 0,  # other guides skipped a claimed hotspot
     "duplicate_hotspot_targets": 0,    # bug counter: two guides same hotspot
+    # NEW: inter-guide spread (position tracking + cumulative repulsion)
+    "blackboard_position_updates": 0,
+    "max_simultaneous_positions": 0,   # highest count of tracked positions
+    "guide_pairwise_min_dist_avg": 0.0,  # average min pairwise dist at tick 100+
     # NEW: commitment zone
     "near_exit_eval_attempts": 0,
     "near_exit_eval_blocked": 0,       # re-eval correctly skipped near exit
@@ -202,8 +206,19 @@ def track_is_claimed(self, position, current_tick, exclude_guide=None, radius=30
         counters["blackboard_claims_respected"] += 1
     return result
 
+# NEW: track position updates (inter-guide spread feature)
+orig_update_position = RouterBlackboard.update_position
+
+def track_update_position(self, guide_id, position, tick):
+    counters["blackboard_position_updates"] += 1
+    orig_update_position(self, guide_id, position, tick)
+    counters["max_simultaneous_positions"] = max(
+        counters["max_simultaneous_positions"], len(self._positions)
+    )
+
 RouterBlackboard.claim = track_claim
 RouterBlackboard.is_claimed = track_is_claimed
+RouterBlackboard.update_position = track_update_position
 
 # ── NEW: Commitment zone + mission-complete self-evac tracking ──
 # Patch _do_escorting to count re-eval attempts in/out of commitment zone.
@@ -307,6 +322,7 @@ RouterGuide._build_solo_danger_grid = orig_build_solo
 RouterGuide._start_self_evacuation = _orig_start_self_evac
 RouterBlackboard.claim = orig_claim
 RouterBlackboard.is_claimed = orig_is_claimed
+RouterBlackboard.update_position = orig_update_position
 
 from evacsim.civilian import ESCAPED, DEAD
 escaped = sum(1 for c in sim.civilians if c.state == ESCAPED)
@@ -392,6 +408,10 @@ print(f"\n--- Blackboard Coordination (NEW) ---")
 print(f"  Total blackboard claims: {counters['blackboard_claims']}")
 print(f"  Claims respected by other guides: {counters['blackboard_claims_respected']}")
 
+print(f"\n--- Inter-Guide Spread (cumulative repulsion, NEW) ---")
+print(f"  Blackboard position updates: {counters['blackboard_position_updates']}")
+print(f"  Max simultaneous tracked positions: {counters['max_simultaneous_positions']}")
+
 print(f"\n--- Commitment Zone (NEW) ---")
 print(f"  Near-exit eval attempts: {counters['near_exit_eval_attempts']}")
 print(f"  Near-exit eval blocked: {counters['near_exit_eval_blocked']}")
@@ -424,6 +444,11 @@ features = [
     # NEW this session
     ("Blackboard claims made", counters["blackboard_claims"] > 0),
     ("Blackboard claims respected (coordination)", counters["blackboard_claims_respected"] >= 0),
+    # NEW: inter-guide spread (cumulative repulsion)
+    ("Blackboard position tracking active",
+     counters["blackboard_position_updates"] > 0),
+    ("Multiple guide positions tracked simultaneously",
+     counters["max_simultaneous_positions"] >= 2),
     ("Commitment zone (no near-exit re-eval)", True),  # structural — cannot fire
     ("Mission-complete self-evac triggers", counters["mission_complete_triggered"] >= 0),
     # Whether guides actually reach the exit depends on sim timing (sim

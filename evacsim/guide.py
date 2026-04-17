@@ -214,20 +214,36 @@ class RouterBlackboard:
     """Shared coordination blackboard for Router guides.
 
     Multi-agent coordination mechanism (blackboard architecture):
-    Routers write claimed hotspot positions when committing to a rescue.
-    Other Routers read the blackboard and skip claimed hotspots to avoid
-    overlap. Claims auto-expire after EXPIRY ticks to handle guide death
-    or rerouting.
 
-    This enables global scanning without territory constraints — Routers
-    dynamically distribute across hotspots rather than being confined to
-    fixed quadrants.
+    1. CLAIMS — Routers write claimed hotspot positions when committing
+       to a rescue. Other Routers skip claimed hotspots to avoid overlap.
+       Claims auto-expire after CLAIM_EXPIRY ticks to handle guide death
+       or rerouting (claims represent future commitment — they need to
+       persist long enough to cover travel + collection time).
+
+    2. POSITIONS — each Router reports its current position every tick.
+       Other Routers read these positions when scoring hotspots and apply
+       a distance-aware repulsion field (cumulative inverse-distance):
+       hotspots near clusters of other guides receive STACKED penalties,
+       encouraging decentralised spread without hard territory assignment.
+       Positions expire after POSITION_EXPIRY ticks (much shorter than
+       claims because they track "where I AM", not "where I'm GOING").
+
+    This implements decentralised coordination via shared spatial
+    awareness — an inter-agent potential-field approach inspired by
+    Reynolds' boids (1987) and potential-field path planning. See the
+    intelligentAgents_coordination lecture on cell division vs.
+    decentralised spreading through potential functions.
     """
 
-    EXPIRY = 60  # ticks before a claim expires (3 × eval_interval)
+    CLAIM_EXPIRY = 60     # ticks before a hotspot claim expires
+    POSITION_EXPIRY = 10  # ticks before a position becomes stale
 
     def __init__(self):
-        self._claims = {}  # guide_id → (position, tick_claimed)
+        self._claims = {}     # guide_id → (position, tick_claimed)
+        self._positions = {}  # guide_id → (position, tick_updated)
+
+    # ── Claims (existing) ──
 
     def claim(self, guide_id, position, tick):
         """Claim a hotspot position."""
@@ -244,16 +260,40 @@ class RouterBlackboard:
         for gid, (pos, tick) in list(self._claims.items()):
             if gid == exclude_guide:
                 continue
-            if current_tick - tick > self.EXPIRY:
+            if current_tick - tick > self.CLAIM_EXPIRY:
                 del self._claims[gid]  # expired
                 continue
             if np.linalg.norm(pos - np.array(position)) < radius:
                 return True
         return False
 
+    # ── Positions (NEW — inter-guide spread) ──
+
+    def update_position(self, guide_id, position, tick):
+        """Record the current position of a Router on the blackboard.
+        Called every tick by each Router."""
+        self._positions[guide_id] = (np.array(position, dtype=float), tick)
+
+    def get_other_positions(self, exclude_guide, current_tick):
+        """Return list of currently-fresh positions of OTHER Routers.
+        Stale positions (older than POSITION_EXPIRY) are filtered out
+        and cleaned up lazily, so dead or departed guides don't keep
+        "holding" territory.
+        """
+        result = []
+        for gid, (pos, tick) in list(self._positions.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.POSITION_EXPIRY:
+                del self._positions[gid]  # lazy cleanup of stale entries
+                continue
+            result.append(pos)
+        return result
+
     def reset(self):
-        """Clear all claims (new simulation)."""
+        """Clear all blackboard state (new simulation)."""
         self._claims.clear()
+        self._positions.clear()
 
 
 def dbscan_cluster(points, epsilon, min_points):
@@ -1790,6 +1830,11 @@ class RouterGuide(Guide):
 
         self._tick += 1
 
+        # Publish current position to blackboard so other Routers can apply
+        # distance-aware hotspot scoring (inter-guide spread via cumulative
+        # repulsion field — see RouterBlackboard.get_other_positions).
+        self._blackboard.update_position(self._guide_id, self.pos, self._tick)
+
         # Update density + congestion data
         self._eval_counter += 1
         if self._eval_counter >= self._eval_interval:
@@ -2363,6 +2408,28 @@ class RouterGuide(Guide):
             epsilon = env.cell_size * 3  # 3 cells (~9m) — room-sized
             clusters = dbscan_cluster(positions, epsilon, min_points=3)
 
+            # Pre-compute data for inter-guide spread (cumulative repulsion
+            # field). Each other Router's current position contributes an
+            # inverse-distance repulsion; when multiple guides are clustered
+            # near a candidate hotspot, their repulsions STACK — biasing this
+            # guide toward distant, uncovered areas. Potential-field method,
+            # lecture reference: intelligentAgents_coordination.pptx
+            # (cell division vs. decentralised spreading via potentials).
+            other_positions = self._blackboard.get_other_positions(
+                exclude_guide=self._guide_id, current_tick=self._tick,
+            )
+            # Map diagonal used to normalise distances to [0, 1] so the
+            # formula adapts to any map size.
+            map_diag = float(np.hypot(
+                rows * env.cell_size, cols * env.cell_size
+            ))
+            # Decay constant: repulsion drops to ~50% at 10% of map diag.
+            REPULSION_DECAY = 10.0
+            # Max bonus: a hotspot maximally far from all other guides
+            # receives a 1.0 + MAX_SPREAD_BONUS score multiplier.
+            # 0.3 → cluster ~23% smaller can be preferred if it's far away.
+            MAX_SPREAD_BONUS = 0.3
+
             # Score each cluster and pick the best
             best_pos = None
             best_score = 0
@@ -2388,7 +2455,28 @@ class RouterGuide(Guide):
 
                 size = len(cluster_indices)
                 centroid_smoke = smoke.get_density_at(cx, cy) if smoke else 0
-                score = size * (1.0 - centroid_smoke * 0.5)
+                safety_factor = 1.0 - centroid_smoke * 0.5
+
+                # Cumulative repulsion: sum inverse-distance contributions
+                # from every other Router's current position.
+                #   repulsion_i = 1 / (1 + REPULSION_DECAY * d_norm_i)
+                # where d_norm_i = distance / map_diagonal, in [0, 1].
+                # Stacking is natural: 3 guides at distance d contribute 3×
+                # the repulsion of 1 guide at that distance.
+                if other_positions:
+                    repulsion = 0.0
+                    for p in other_positions:
+                        d_norm = float(np.hypot(cx - p[0], cy - p[1])) / map_diag
+                        repulsion += 1.0 / (1.0 + REPULSION_DECAY * d_norm)
+                    # Normalise by number of other guides so the value is in
+                    # [0, 1] regardless of guide count. 1.0 = maximum repulsion
+                    # (all other guides adjacent). 0 = no repulsion.
+                    normalized = repulsion / len(other_positions)
+                    spread_bonus = 1.0 + MAX_SPREAD_BONUS * (1.0 - normalized)
+                else:
+                    spread_bonus = 1.0  # alone — no spread bias needed
+
+                score = size * safety_factor * spread_bonus
 
                 if score > best_score:
                     best_score = score
