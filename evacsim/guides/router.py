@@ -656,9 +656,33 @@ class RouterGuide(Guide):
                         best_score = score
                         best_exit = (ex, ey)
                 self._escort_exit = best_exit
-                self._waypoints = bfs_path(
-                    env, self.pos, np.array(best_exit), fire_grid=danger
+                # FIX 2 — use Dijkstra with safety validation instead of
+                # plain BFS. BFS only checks "passable" (≤ 0.3) and picks
+                # the shortest such path; Dijkstra's weighted cost prefers
+                # genuinely cleaner routes, and the validator rejects any
+                # path whose waypoints exceed the danger threshold.
+                dij_path = dijkstra_congestion_path(
+                    env, self.pos, np.array(best_exit),
+                    fire_grid=fg, smoke_grid=sg,
+                    civilian_density=self._density_grid,
                 )
+                dij_safe = True
+                if dij_path and danger is not None:
+                    for wp in dij_path:
+                        wr, wc = env.world_to_grid(wp[0], wp[1])
+                        if (0 <= wr < danger.shape[0]
+                                and 0 <= wc < danger.shape[1]):
+                            if danger[wr, wc] > 0.3:
+                                dij_safe = False
+                                break
+                if dij_path and dij_safe:
+                    self._waypoints = dij_path
+                else:
+                    # BFS fallback with danger grid (empty OR unsafe)
+                    self._waypoints = bfs_path(
+                        env, self.pos, np.array(best_exit),
+                        fire_grid=danger,
+                    )
 
         self._recruit_nearby_unlimited(env, smoke, civilians)
 
@@ -716,23 +740,46 @@ class RouterGuide(Guide):
                 # Only switch if >30% better (avoid oscillation)
                 if new_score < cur_score * 0.7:
                     self._escort_exit = (ex, ey)
-                    self._waypoints = dijkstra_congestion_path(
+                    # Build danger grid up-front — used both by the safety
+                    # validator below and by the BFS fallback.
+                    if fg is not None and sg is not None:
+                        danger = np.maximum(fg, sg * 1.0)
+                    elif fg is not None:
+                        danger = fg
+                    elif sg is not None:
+                        danger = sg * 1.0
+                    else:
+                        danger = None
+
+                    dij_path = dijkstra_congestion_path(
                         env, self.pos, np.array((ex, ey)),
                         fire_grid=fg, smoke_grid=sg,
                         civilian_density=self._density_grid,
                     )
-                    # BFS fallback if Dijkstra returns empty
-                    if not self._waypoints:
-                        if fg is not None and sg is not None:
-                            danger = np.maximum(fg, sg * 1.0)
-                        elif fg is not None:
-                            danger = fg
-                        elif sg is not None:
-                            danger = sg * 1.0
-                        else:
-                            danger = None
+
+                    # FIX 1 — safety validation on the re-evaluation path,
+                    # matching _start_escort's pattern. Dijkstra's weighted
+                    # cost can still pick a shorter path through moderate
+                    # smoke over a clean longer path; the validator rejects
+                    # any route with a waypoint in danger > 0.3 and falls
+                    # back to BFS with the danger grid.
+                    dij_safe = True
+                    if dij_path and danger is not None:
+                        for wp in dij_path:
+                            wr, wc = env.world_to_grid(wp[0], wp[1])
+                            if (0 <= wr < danger.shape[0]
+                                    and 0 <= wc < danger.shape[1]):
+                                if danger[wr, wc] > 0.3:
+                                    dij_safe = False
+                                    break
+
+                    if dij_path and dij_safe:
+                        self._waypoints = dij_path
+                    else:
+                        # BFS fallback with danger grid (empty OR unsafe)
                         self._waypoints = bfs_path(
-                            env, self.pos, np.array((ex, ey)), fire_grid=danger
+                            env, self.pos, np.array((ex, ey)),
+                            fire_grid=danger,
                         )
                     break  # Switch once per re-evaluation
 
@@ -749,8 +796,12 @@ class RouterGuide(Guide):
                     self.vel = np.zeros(2)
                     return
                 # STUCK FIX: waypoints empty but not near exit.
-                # Recompute path using BFS with danger grid (Sweeper pattern).
-                # This prevents guide standing still mid-escort.
+                # Recompute a path so the guide doesn't stand still mid-escort.
+                # FIX 2 — upgraded from plain BFS to Dijkstra with safety
+                # validation (matches _start_escort and re-eval pattern):
+                # Dijkstra weights smoke/fire/density in cost; validator
+                # rejects paths with any waypoint in danger > 0.3; BFS is
+                # the last-resort fallback.
                 fg = getattr(self, "_fire_grid", None)
                 sg = getattr(self, "_smoke_grid", None)
                 if fg is not None and sg is not None:
@@ -761,9 +812,28 @@ class RouterGuide(Guide):
                     danger = sg * 1.0
                 else:
                     danger = None
-                self._waypoints = bfs_path(
-                    env, self.pos, np.array(self._escort_exit), fire_grid=danger
+
+                dij_path = dijkstra_congestion_path(
+                    env, self.pos, np.array(self._escort_exit),
+                    fire_grid=fg, smoke_grid=sg,
+                    civilian_density=self._density_grid,
                 )
+                dij_safe = True
+                if dij_path and danger is not None:
+                    for wp in dij_path:
+                        wr, wc = env.world_to_grid(wp[0], wp[1])
+                        if (0 <= wr < danger.shape[0]
+                                and 0 <= wc < danger.shape[1]):
+                            if danger[wr, wc] > 0.3:
+                                dij_safe = False
+                                break
+                if dij_path and dij_safe:
+                    self._waypoints = dij_path
+                else:
+                    self._waypoints = bfs_path(
+                        env, self.pos, np.array(self._escort_exit),
+                        fire_grid=danger,
+                    )
             if not self._waypoints:
                 self.vel = np.zeros(2)
         else:
