@@ -14,10 +14,15 @@ Saves results to CSV for analysis.
 
 Usage:
     python -m experiments.runner                  # Full 14,400 runs
-    python -m experiments.runner --quick          # Quick test (60 runs)
-    python -m experiments.runner --medium         # Medium test (600 runs)
+    python -m experiments.runner --smoke          # Smoke test (4 runs, ~45s)
+    python -m experiments.runner --pilot          # Pilot test (960 runs, ~32 min)
     python -m experiments.runner --policy beacon  # Single policy only
     python -m experiments.runner --map maps/bottleneck_A.txt  # Single map
+
+Test modes hierarchy (use for increasing confidence):
+  --smoke  → 4 runs — quickest sanity check (one of each policy)
+  --pilot  → 960 runs — all maps, 2 fires, 3 crowds, 5 trials — reproducibility baseline
+  (full)   → 14,400 runs — 8 maps x 5 fires x 4 policies x 3 crowds x 30 trials
 """
 
 import os
@@ -227,13 +232,9 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
 def main():
     parser = argparse.ArgumentParser(description="Run evacuation experiments")
     parser.add_argument("--smoke", action="store_true",
-                        help="Smoke: 1 map, 1 fire, 4 policies, 1 size, 1 trial = 4 runs")
-    parser.add_argument("--quick", action="store_true",
-                        help="Quick: 1 map, 1 fire, 4 policies, 3 sizes, 5 trials = 60 runs")
+                        help="Smoke: 1 map, 1 fire, 4 policies, 1 size, 1 trial = 4 runs (~45s)")
     parser.add_argument("--pilot", action="store_true",
-                        help="Pilot: 8 maps, 1 fire, 4 policies, 3 sizes, 3 trials = 288 runs (all map types)")
-    parser.add_argument("--medium", action="store_true",
-                        help="Medium: 1 map, 5 fire, 4 policies, 3 sizes, 10 trials = 600 runs")
+                        help="Pilot: 8 maps, 2 fires, 4 policies, 3 sizes, 5 trials = 960 runs (~32 min) — reproducibility baseline")
     parser.add_argument("--policy", type=str, default=None,
                         help="Run single policy only")
     parser.add_argument("--map", type=str, default=None,
@@ -252,32 +253,22 @@ def main():
             crowd_sizes=[100],
             n_trials=1,
         )
-        print(f"SMOKE TEST: {len(configs)} runs (sanity check — ~15 seconds)")
-    elif args.quick:
+        print(f"SMOKE TEST: {len(configs)} runs (sanity check — ~45 seconds)")
+    elif args.pilot:
+        # PILOT: broad enough to serve as a reproducibility baseline.
+        # 8 maps × 2 fires × 4 policies × 3 crowds × 5 trials = 960 runs.
+        # Includes 2 fire positions (center + top_left) so we exercise
+        # fire-position-dependent code paths. 5 trials per condition for
+        # variance in each cell. At ~0.5 runs/sec this takes ~32 min.
         configs = build_configs(
-            maps=["maps/bottleneck_A.txt"],
-            fire_positions=["center"],
+            maps=MAPS,  # all 8 maps
+            fire_positions=["center", "top_left"],  # 2 fires for coverage
             policies=POLICIES,
             crowd_sizes=CROWD_SIZES,
             n_trials=5,
         )
-        print(f"QUICK TEST: {len(configs)} runs")
-    elif args.pilot:
-        configs = build_configs(
-            maps=MAPS,  # All 8 maps
-            fire_positions=["center"],
-            policies=POLICIES,
-            crowd_sizes=CROWD_SIZES,
-            n_trials=3,
-        )
-        print(f"PILOT TEST: {len(configs)} runs (all maps, center fire, 3 trials)")
-    elif args.medium:
-        configs = build_configs(
-            maps=["maps/bottleneck_A.txt"],
-            fire_positions=FIRE_POSITIONS,
-            n_trials=10,
-        )
-        print(f"MEDIUM TEST: {len(configs)} runs")
+        print(f"PILOT TEST: {len(configs)} runs "
+              f"(8 maps, 2 fires, 4 policies, 3 crowds, 5 trials)")
     else:
         maps = [args.map] if args.map else None
         policies = [args.policy] if args.policy else None

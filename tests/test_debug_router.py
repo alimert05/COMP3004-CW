@@ -1,5 +1,5 @@
 """
-Router Guide — Feature Verification Debug Test
+Router Guide -- Feature Verification Debug Test
 Tests: DBSCAN clustering, two-phase search (cluster + individual fallback),
 congestion-aware exit selection, Dijkstra pathfinding, predicted congestion,
 mid-escort re-evaluation, danger detection (all phases), smoke-aware paths,
@@ -27,7 +27,7 @@ config = SimConfig(
 )
 sim = Simulation(config)
 
-# ── Tracking ──
+# -- Tracking --
 counters = {
     # DBSCAN
     "dbscan_cluster_finds": 0,
@@ -36,41 +36,33 @@ counters = {
     # Escort
     "escort_starts": [],
     "chose_nonnear_exit": 0,
-    "dijkstra_used": 0,
-    "bfs_fallback_used": 0,
     # Mid-escort
     "escort_reroutes": 0,
-    # Danger detection per phase
+    # Danger detection per phase (note: ESCORTING phase has danger REROUTE,
+    # tracked separately via escort_reroutes, not a separate counter here)
     "danger_scanning": 0,
     "danger_responding": 0,
     "danger_collecting": 0,
-    "danger_escorting": 0,
     "danger_returning": 0,
     # Other
     "smoke_aware_paths": 0,
     "min_group_blocks": 0,
     "max_group_triggers": 0,
-    "stuck_fix_bfs": 0,
     "destination_aborts": 0,
-    "reroute_cooldowns": 0,
     "predicted_congestion_nonzero": 0,
-    # NEW: dynamic max_group tracking
+    # Dynamic max_group tracking
     "dynamic_max_changes": 0,
     "dynamic_max_min": 999,
     "dynamic_max_max": 0,
-    "dynamic_earlier_than_sweeper": False,
-    # NEW: active releasing tracking
+    # Active releasing tracking
     "active_releases_exit_target": 0,
-    "timeout_with_exit_target": 0,
-    "timeout_wandering": 0,
-    # NEW (this session): blackboard coordination
+    "timeout_wandering": 0,        # bug-prevention counter (should stay 0)
+    # Blackboard coordination
     "blackboard_claims": 0,
     "blackboard_claims_respected": 0,  # other guides skipped a claimed hotspot
-    "duplicate_hotspot_targets": 0,    # bug counter: two guides same hotspot
-    # NEW: inter-guide spread (position tracking + cumulative repulsion)
+    # Inter-guide spread (position tracking + cumulative repulsion)
     "blackboard_position_updates": 0,
     "max_simultaneous_positions": 0,   # highest count of tracked positions
-    "guide_pairwise_min_dist_avg": 0.0,  # average min pairwise dist at tick 100+
     # NEW: commitment zone
     "near_exit_eval_attempts": 0,
     "near_exit_eval_blocked": 0,       # re-eval correctly skipped near exit
@@ -86,7 +78,7 @@ def get_gid(guide):
         if g is guide: return i
     return -1
 
-# ── Patches ──
+# -- Patches --
 orig_find_hotspot = RouterGuide._find_hotspot
 orig_start_escort = RouterGuide._start_escort
 orig_do_scanning = RouterGuide._do_scanning
@@ -190,7 +182,7 @@ def track_solo_danger(self, fg, sg):
         counters["smoke_aware_paths"] += 1
     return result
 
-# ── NEW: Blackboard coordination tracking ──
+# -- NEW: Blackboard coordination tracking --
 from evacsim.guide import RouterBlackboard
 orig_claim = RouterBlackboard.claim
 orig_is_claimed = RouterBlackboard.is_claimed
@@ -220,7 +212,7 @@ RouterBlackboard.claim = track_claim
 RouterBlackboard.is_claimed = track_is_claimed
 RouterBlackboard.update_position = track_update_position
 
-# ── NEW: Commitment zone + mission-complete self-evac tracking ──
+# -- NEW: Commitment zone + mission-complete self-evac tracking --
 # Patch _do_escorting to count re-eval attempts in/out of commitment zone.
 # Patch _start_self_evacuation to count mission-complete triggers.
 _orig_do_escorting = RouterGuide._do_escorting
@@ -266,7 +258,7 @@ RouterGuide._update_exit_counts = track_exit_counts
 RouterGuide._build_solo_danger_grid = track_solo_danger
 RouterGuide._start_self_evacuation = track_start_self_evac
 
-# ── NEW: Track abandonment — civilian transition FOLLOWING_GUIDE → WANDERING ──
+# -- NEW: Track abandonment -- civilian transition FOLLOWING_GUIDE → WANDERING --
 # This should NEVER happen outside of exit areas in the always-escort model.
 # We snapshot civilian states per tick and watch for unexpected transitions.
 prev_civ_states = {}
@@ -332,13 +324,16 @@ alive = sum(1 for g in sim.guides if g.alive)
 counters["guides_escaped_via_self_evac"] = sum(
     1 for g in sim.guides if getattr(g, "escaped", False)
 )
+guides_escaped = counters["guides_escaped_via_self_evac"]
+guides_survived = alive + guides_escaped  # didn't die in fire
 healths = [f"{g.health:.0%}" for g in sim.guides]
 
 print(f"\nRESULT: TV={escaped}, TM={dead}, "
       f"survival={escaped/config.n_civilians*100:.1f}%, ticks={sim.tick}")
-print(f"Guides: {alive}/4 alive, healths={healths}")
+print(f"Guides: {guides_survived}/4 survived "
+      f"(in-building={alive}, escaped={guides_escaped}), healths={healths}")
 
-# ── Report ──
+# -- Report --
 print(f"\n{'='*60}")
 print("ROUTER FEATURE VERIFICATION")
 print(f"{'='*60}")
@@ -371,7 +366,7 @@ print(f"\n--- Danger Detection (per phase) ---")
 print(f"  SCANNING:   {counters['danger_scanning']}")
 print(f"  RESPONDING: {counters['danger_responding']}")
 print(f"  COLLECTING: {counters['danger_collecting']}")
-print(f"  ESCORTING:  {counters['danger_escorting']}")
+print(f"  ESCORTING:  (via escort_reroutes = {counters['escort_reroutes']})")
 print(f"  RETURNING:  {counters['danger_returning']}")
 total_danger = sum(counters[k] for k in counters if k.startswith("danger_"))
 print(f"  TOTAL:      {total_danger}")
@@ -391,7 +386,7 @@ for i, g in enumerate(sim.guides):
     g_escorts = [e for e in counters["escort_starts"] if e[1] == i]
     print(f"  Guide {i}: {len(g_escorts)} escorts, alive={g.alive}, health={g.health:.0%}")
 
-# ── DBSCAN standalone test ──
+# -- DBSCAN standalone test --
 print(f"\n--- DBSCAN Standalone Verification ---")
 test_points = [
     np.array([0, 0]), np.array([1, 0]), np.array([2, 0]),  # cluster 1
@@ -449,15 +444,37 @@ features = [
      counters["blackboard_position_updates"] > 0),
     ("Multiple guide positions tracked simultaneously",
      counters["max_simultaneous_positions"] >= 2),
-    ("Commitment zone (no near-exit re-eval)", True),  # structural — cannot fire
+    ("Commitment zone (no near-exit re-eval)", True),  # structural -- cannot fire
     ("Mission-complete self-evac triggers", counters["mission_complete_triggered"] >= 0),
     # Whether guides actually reach the exit depends on sim timing (sim
     # terminates when civilians are done; guide may still be en route).
     # The `escaped` flag mechanism is verified independently by Beacon test.
     ("`escaped` flag mechanism exists", counters["guides_escaped_via_self_evac"] >= 0),
     ("Duty of care (no mid-map abandonment)", counters["following_guide_abandoned_to_wandering"] == 0),
+    # escape_tick: every ESCAPED civilian must have a valid escape_tick.
+    # Feeds the MT (mean evacuation time) metric used in analysis.
+    ("escape_tick recorded on every escape",
+     all(c.escape_tick is not None and c.escape_tick > 0
+         for c in sim.civilians if c.state == ESCAPED)),
 ]
 working = sum(1 for _, v in features if v)
 for name, ok in features:
     print(f"  {'[OK]' if ok else '[??]'} {name}")
 print(f"\n  Features verified: {working}/{len(features)}")
+
+# -- Consolidated counter dump (for pre/post-refactor diffing) --
+# Every counter in alphabetical order. If refactor changes any count,
+# a simple `diff before.txt after.txt` will flag it clearly.
+print(f"\n{'='*60}")
+print("FEATURE FIRE COUNTS (consolidated -- for diffing)")
+print(f"{'='*60}")
+for key in sorted(counters.keys()):
+    val = counters[key]
+    if isinstance(val, list):
+        print(f"  {key}: len={len(val)}  values={val}")
+    elif isinstance(val, bool):
+        print(f"  {key}: {val}")
+    elif isinstance(val, float):
+        print(f"  {key}: {val:.4f}")
+    else:
+        print(f"  {key}: {val}")

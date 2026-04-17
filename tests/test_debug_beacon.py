@@ -1,5 +1,5 @@
 """
-Beacon Guide — Feature Verification Debug Test
+Beacon Guide -- Feature Verification Debug Test
 Tests: positioning, sound broadcast, probabilistic hearing, wake-up,
 exit telling, self-evacuation, smoke effect on broadcast.
 """
@@ -23,11 +23,9 @@ config = SimConfig(
 )
 sim = Simulation(config)
 
-# ── Tracking ──
+# -- Tracking --
 counters = {
-    "broadcasts_heard": 0,
     "idle_woken": 0,
-    "reacting_shortened": 0,
     "exit_told": 0,
     "in_position_tick": [None] * 4,
     "self_evacuations": 0,
@@ -94,13 +92,16 @@ result = sim.run()
 BeaconGuide.update = real_update
 
 alive = sum(1 for g in sim.guides if g.alive)
+escaped = sum(1 for g in sim.guides if getattr(g, "escaped", False))
+survived = alive + escaped  # didn't die in fire
 healths = [f"{g.health:.0%}" for g in sim.guides]
 
 print(f"\nRESULT: TV={result['TV']}, TM={result['TM']}, "
       f"survival={result['survival_rate']*100:.1f}%, ticks={sim.tick}")
-print(f"Guides: {alive}/4 alive, healths={healths}")
+print(f"Guides: {survived}/4 survived (in-building={alive}, escaped={escaped}), "
+      f"healths={healths}")
 
-# ── Report ──
+# -- Report --
 print(f"\n{'='*60}")
 print("BEACON FEATURE VERIFICATION")
 print(f"{'='*60}")
@@ -149,6 +150,14 @@ features = [
     ("Sound broadcast (wakes IDLE)", counters["idle_woken"] > 0),
     ("Exit telling (gives exit info)", counters["exit_told"] > 0),
     ("Health system (takes damage)", any(g.health < 1.0 for g in sim.guides)),
+    ("Self-evac on low health triggers",
+     counters["self_evacuations"] > 0
+     or all(g.health > g._health_threshold for g in sim.guides)),
+    # escape_tick: every ESCAPED civilian must have a valid escape_tick.
+    # This feeds the MT (mean evacuation time) metric used in analysis.
+    ("escape_tick recorded on every escape",
+     all(c.escape_tick is not None and c.escape_tick > 0
+         for c in sim.civilians if c.state == ESCAPED)),
     # NEW this session
     ("`escaped` flag distinguishes evacuated vs killed",
      guides_escaped + guides_killed + sum(1 for g in sim.guides if g.alive)
@@ -158,3 +167,21 @@ working = sum(1 for _, v in features if v)
 for name, ok in features:
     print(f"  {'[OK]' if ok else '[FAIL]'} {name}")
 print(f"\n  Features verified: {working}/{len(features)}")
+
+# -- Consolidated counter dump (for pre/post-refactor diffing) --
+# Every counter in alphabetical order. If refactor changes any count,
+# a simple `diff before.txt after.txt` will flag it clearly.
+print(f"\n{'='*60}")
+print("FEATURE FIRE COUNTS (consolidated -- for diffing)")
+print(f"{'='*60}")
+for key in sorted(counters.keys()):
+    val = counters[key]
+    if isinstance(val, list):
+        # Show list length plus contents for precise diffing
+        print(f"  {key}: len={len(val)}  values={val}")
+    elif isinstance(val, bool):
+        print(f"  {key}: {val}")
+    elif isinstance(val, float):
+        print(f"  {key}: {val:.4f}")
+    else:
+        print(f"  {key}: {val}")

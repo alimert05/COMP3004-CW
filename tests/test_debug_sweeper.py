@@ -1,5 +1,5 @@
 """
-Sweeper Guide — Feature Verification Debug Test
+Sweeper Guide -- Feature Verification Debug Test
 Tests: patrol route, collecting, min-5 threshold, danger detection,
 escort to nearest exit, releasing (active + exit target), unlimited escort recruit,
 cleared room skipping, smoke-aware paths, self-evacuation,
@@ -26,32 +26,28 @@ config = SimConfig(
 )
 sim = Simulation(config)
 
-# ── Tracking ──
+# -- Tracking --
 counters = {
     "escort_starts": [],        # (tick, guide, group_size, trigger)
-    "escort_pickups": 0,        # unlimited recruit during escort
+    "escort_pickups": 0,        # unlimited recruit during escort (map-dependent)
     "releases": [],             # (tick, guide, released, timeout)
     "patrol_skips": 0,          # cleared room skips
     "danger_escorts": 0,        # danger-triggered escorts
     "min5_escorts": 0,          # min-5 threshold escorts
-    "escort_danger_reroutes": 0,  # danger during escort
-    # NEW: dynamic max_group tracking
+    # Dynamic max_group tracking
     "dynamic_max_changes": 0,   # ticks where effective_max < base
     "dynamic_max_min": 999,     # lowest effective_max seen
     "dynamic_max_max": 0,       # highest effective_max seen
-    # NEW: active releasing tracking
+    # Active releasing tracking
     "active_releases_exit_target": 0,  # civilians given exit target during release
-    "timeout_with_exit_target": 0,     # stragglers given exit target on timeout
-    "timeout_wandering": 0,           # stragglers left wandering (should be 0 now)
-    # Territory reallocation
-    "territory_reallocs": 0,
-    # NEW (this session): escaped flag + self-evacuation tracking
+    "timeout_wandering": 0,     # stragglers left wandering (bug-prevention, should be 0)
+    # Escaped flag + self-evacuation tracking
     "guides_escaped_via_self_evac": 0,
     "self_evac_low_health_triggered": 0,
-    # NEW: territory reallocation verification
-    "sweepers_registered": 0,
-    "sweepers_with_cleared_all": 0,
-    "sweepers_adopted_peer_points": 0,
+    # Territory reallocation verification
+    "sweepers_registered": 0,         # guides in class-level _all_sweepers registry
+    "sweepers_with_cleared_all": 0,   # guides that cleared all initial patrol points
+    "sweepers_adopted_peer_points": 0,  # guides whose patrol route grew via reallocation
 }
 
 orig_do_collecting = SweeperGuide._do_collecting
@@ -137,7 +133,7 @@ SweeperGuide._do_releasing = track_releasing
 SweeperGuide._advance_patrol = track_advance
 SweeperGuide._start_self_evacuation = track_start_self_evac_sw
 
-# NEW: Territory reallocation — record initial patrol route sizes
+# NEW: Territory reallocation -- record initial patrol route sizes
 initial_patrol_sizes = [len(g._patrol_route) for g in sim.guides]
 counters["sweepers_registered"] = len(SweeperGuide._all_sweepers)
 
@@ -184,13 +180,16 @@ SweeperGuide._advance_patrol = orig_advance_patrol
 SweeperGuide._start_self_evacuation = _orig_start_self_evac_sw
 
 alive = sum(1 for g in sim.guides if g.alive)
+guides_escaped = sum(1 for g in sim.guides if getattr(g, "escaped", False))
+guides_survived = alive + guides_escaped  # didn't die in fire
 healths = [f"{g.health:.0%}" for g in sim.guides]
 
 print(f"\nRESULT: TV={escaped}, TM={dead}, "
       f"survival={escaped/config.n_civilians*100:.1f}%, ticks={sim.tick}")
-print(f"Guides: {alive}/4 alive, healths={healths}")
+print(f"Guides: {guides_survived}/4 survived "
+      f"(in-building={alive}, escaped={guides_escaped}), healths={healths}")
 
-# ── Report ──
+# -- Report --
 print(f"\n{'='*60}")
 print("SWEEPER FEATURE VERIFICATION")
 print(f"{'='*60}")
@@ -265,8 +264,30 @@ features = [
     ("Self-evac on low health", counters["self_evac_low_health_triggered"] >= 0),
     ("`escaped` flag tracks guide evacuation",
      counters["guides_escaped_via_self_evac"] >= 0),
+    # escape_tick: every ESCAPED civilian must have a valid escape_tick.
+    # Feeds the MT (mean evacuation time) metric used in analysis.
+    ("escape_tick recorded on every escape",
+     all(c.escape_tick is not None and c.escape_tick > 0
+         for c in sim.civilians if c.state == ESCAPED)),
 ]
 working = sum(1 for _, v in features if v)
 for name, ok in features:
     print(f"  {'[OK]' if ok else '[??]'} {name}")
 print(f"\n  Features verified: {working}/{len(features)}")
+
+# -- Consolidated counter dump (for pre/post-refactor diffing) --
+# Every counter in alphabetical order. If refactor changes any count,
+# a simple `diff before.txt after.txt` will flag it clearly.
+print(f"\n{'='*60}")
+print("FEATURE FIRE COUNTS (consolidated -- for diffing)")
+print(f"{'='*60}")
+for key in sorted(counters.keys()):
+    val = counters[key]
+    if isinstance(val, list):
+        print(f"  {key}: len={len(val)}  values={val}")
+    elif isinstance(val, bool):
+        print(f"  {key}: {val}")
+    elif isinstance(val, float):
+        print(f"  {key}: {val:.4f}")
+    else:
+        print(f"  {key}: {val}")
