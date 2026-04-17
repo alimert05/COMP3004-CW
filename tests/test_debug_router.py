@@ -63,6 +63,12 @@ counters = {
     # Inter-guide spread (position tracking + cumulative repulsion)
     "blackboard_position_updates": 0,
     "max_simultaneous_positions": 0,   # highest count of tracked positions
+    # A1: exit coordination (destination claims)
+    "a1_exit_claim_updates": 0,        # how often update_exit_claim fires
+    "a1_incoming_queries": 0,          # how often get_incoming_count is called
+    "a1_incoming_nonzero": 0,          # subset where incoming > 0 (A1 influenced scoring)
+    "a1_max_incoming_seen": 0,         # peak incoming count observed in any query
+    "a1_exit_releases": 0,             # explicit releases at arrival
     # NEW: commitment zone
     "near_exit_eval_attempts": 0,
     "near_exit_eval_blocked": 0,       # re-eval correctly skipped near exit
@@ -208,9 +214,36 @@ def track_update_position(self, guide_id, position, tick):
         counters["max_simultaneous_positions"], len(self._positions)
     )
 
+# A1 — track exit-coordination blackboard activity
+orig_update_exit_claim = RouterBlackboard.update_exit_claim
+orig_release_exit_claim = RouterBlackboard.release_exit_claim
+orig_get_incoming_count = RouterBlackboard.get_incoming_count
+
+def track_update_exit_claim(self, guide_id, exit_pos, group_size, tick):
+    counters["a1_exit_claim_updates"] += 1
+    orig_update_exit_claim(self, guide_id, exit_pos, group_size, tick)
+
+def track_release_exit_claim(self, guide_id):
+    counters["a1_exit_releases"] += 1
+    orig_release_exit_claim(self, guide_id)
+
+def track_get_incoming_count(self, exit_pos, current_tick,
+                              exclude_guide=None, radius=15.0):
+    n = orig_get_incoming_count(self, exit_pos, current_tick,
+                                 exclude_guide=exclude_guide, radius=radius)
+    counters["a1_incoming_queries"] += 1
+    if n > 0:
+        counters["a1_incoming_nonzero"] += 1
+        if n > counters["a1_max_incoming_seen"]:
+            counters["a1_max_incoming_seen"] = n
+    return n
+
 RouterBlackboard.claim = track_claim
 RouterBlackboard.is_claimed = track_is_claimed
 RouterBlackboard.update_position = track_update_position
+RouterBlackboard.update_exit_claim = track_update_exit_claim
+RouterBlackboard.release_exit_claim = track_release_exit_claim
+RouterBlackboard.get_incoming_count = track_get_incoming_count
 
 # -- NEW: Commitment zone + mission-complete self-evac tracking --
 # Patch _do_escorting to count re-eval attempts in/out of commitment zone.
@@ -315,6 +348,9 @@ RouterGuide._start_self_evacuation = _orig_start_self_evac
 RouterBlackboard.claim = orig_claim
 RouterBlackboard.is_claimed = orig_is_claimed
 RouterBlackboard.update_position = orig_update_position
+RouterBlackboard.update_exit_claim = orig_update_exit_claim
+RouterBlackboard.release_exit_claim = orig_release_exit_claim
+RouterBlackboard.get_incoming_count = orig_get_incoming_count
 
 from evacsim.civilian import ESCAPED, DEAD
 escaped = sum(1 for c in sim.civilians if c.state == ESCAPED)
@@ -407,6 +443,13 @@ print(f"\n--- Inter-Guide Spread (cumulative repulsion, NEW) ---")
 print(f"  Blackboard position updates: {counters['blackboard_position_updates']}")
 print(f"  Max simultaneous tracked positions: {counters['max_simultaneous_positions']}")
 
+print(f"\n--- A1: Exit Coordination (NEW) ---")
+print(f"  Exit claim updates (every tick during ESCORTING): {counters['a1_exit_claim_updates']}")
+print(f"  Explicit exit-claim releases (arrivals): {counters['a1_exit_releases']}")
+print(f"  Incoming-count queries during exit scoring: {counters['a1_incoming_queries']}")
+print(f"  Queries that found pending arrivals (>0): {counters['a1_incoming_nonzero']}")
+print(f"  Max incoming count observed in any query: {counters['a1_max_incoming_seen']}")
+
 print(f"\n--- Commitment Zone (NEW) ---")
 print(f"  Near-exit eval attempts: {counters['near_exit_eval_attempts']}")
 print(f"  Near-exit eval blocked: {counters['near_exit_eval_blocked']}")
@@ -439,6 +482,13 @@ features = [
     # NEW this session
     ("Blackboard claims made", counters["blackboard_claims"] > 0),
     ("Blackboard claims respected (coordination)", counters["blackboard_claims_respected"] >= 0),
+    # A1: Exit coordination (destination claims)
+    ("A1 exit claims published during escort",
+     counters["a1_exit_claim_updates"] > 0),
+    ("A1 exit-scoring reads incoming claims",
+     counters["a1_incoming_queries"] > 0),
+    ("A1 influenced exit scoring at least once",
+     counters["a1_incoming_nonzero"] > 0),
     # NEW: inter-guide spread (cumulative repulsion)
     ("Blackboard position tracking active",
      counters["blackboard_position_updates"] > 0),

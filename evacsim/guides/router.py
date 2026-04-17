@@ -41,12 +41,16 @@ class RouterBlackboard:
     decentralised spreading through potential functions.
     """
 
-    CLAIM_EXPIRY = 60     # ticks before a hotspot claim expires
-    POSITION_EXPIRY = 10  # ticks before a position becomes stale
+    CLAIM_EXPIRY = 60         # ticks before a hotspot claim expires
+    POSITION_EXPIRY = 10      # ticks before a position becomes stale
+    EXIT_CLAIM_EXPIRY = 10    # ticks before an exit claim expires
+                              # (refreshed every tick during ESCORTING,
+                              # so TTL matches the positions pattern)
 
     def __init__(self):
-        self._claims = {}     # guide_id → (position, tick_claimed)
-        self._positions = {}  # guide_id → (position, tick_updated)
+        self._claims = {}       # guide_id → (position, tick_claimed)
+        self._positions = {}    # guide_id → (position, tick_updated)
+        self._exit_claims = {}  # guide_id → (exit_pos, group_size, tick)
 
     # ── Claims (existing) ──
 
@@ -55,8 +59,11 @@ class RouterBlackboard:
         self._claims[guide_id] = (np.array(position), tick)
 
     def release(self, guide_id):
-        """Release a claim (guide finished escorting or died)."""
+        """Release a claim (guide finished escorting or died).
+        Also clears any exit claim (defensive — any cleanup path that
+        releases a hotspot claim should also release the exit claim)."""
         self._claims.pop(guide_id, None)
+        self._exit_claims.pop(guide_id, None)
 
     def is_claimed(self, position, current_tick, exclude_guide=None,
                    radius=30.0):
@@ -95,10 +102,49 @@ class RouterBlackboard:
             result.append(pos)
         return result
 
+    # ── Exit claims (A1 — destination coordination) ──
+
+    def update_exit_claim(self, guide_id, exit_pos, group_size, tick):
+        """Refresh my exit claim. Called every tick while ESCORTING so the
+        entry stays fresh. Same pattern as `update_position` — if the guide
+        dies silently, the entry auto-expires in EXIT_CLAIM_EXPIRY ticks."""
+        self._exit_claims[guide_id] = (
+            np.array(exit_pos, dtype=float), int(group_size), tick,
+        )
+
+    def release_exit_claim(self, guide_id):
+        """Release exit claim (arrived at exit → group is now in the queue,
+        no longer 'incoming'). Avoids double-counting for the brief window
+        between arrival and natural expiry."""
+        self._exit_claims.pop(guide_id, None)
+
+    def get_incoming_count(self, exit_pos, current_tick,
+                           exclude_guide=None, radius=15.0):
+        """Sum of `group_size` across OTHER Routers currently escorting
+        toward this exit (within `radius` world units — handles minor
+        position variation).
+
+        Used in exit scoring: current_queue + incoming = effective queue
+        a newly arriving group will face. Prevents multiple Routers from
+        independently picking the same 'cleanest' exit and piling up.
+        """
+        total = 0
+        target = np.array(exit_pos, dtype=float)
+        for gid, (pos, size, tick) in list(self._exit_claims.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.EXIT_CLAIM_EXPIRY:
+                del self._exit_claims[gid]  # lazy cleanup
+                continue
+            if np.linalg.norm(pos - target) < radius:
+                total += size
+        return total
+
     def reset(self):
         """Clear all blackboard state (new simulation)."""
         self._claims.clear()
         self._positions.clear()
+        self._exit_claims.clear()
 
 
 class RouterGuide(Guide):
@@ -272,6 +318,16 @@ class RouterGuide(Guide):
         # distance-aware hotspot scoring (inter-guide spread via cumulative
         # repulsion field — see RouterBlackboard.get_other_positions).
         self._blackboard.update_position(self._guide_id, self.pos, self._tick)
+
+        # A1 — exit coordination. While escorting, publish my destination
+        # and group size so other Routers' exit scoring sees "N civilians
+        # incoming from guide G" and can prefer less-targeted exits,
+        # preventing independent-decision pile-ups at the same exit.
+        if self._phase == self.ESCORTING and self._escort_exit is not None:
+            self._blackboard.update_exit_claim(
+                self._guide_id, self._escort_exit,
+                len(self._group), self._tick,
+            )
 
         # Update density + congestion data
         self._eval_counter += 1
@@ -580,7 +636,15 @@ class RouterGuide(Guide):
                 best_exit, best_score = self._escort_exit, float("inf")
                 for ex, ey in self.known_exits:
                     dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-                    cong = self._exit_counts.get((ex, ey), 0) * 30.0
+                    # A1 — effective congestion = current queue + incoming
+                    # from OTHER Routers (self excluded). Stops emergency
+                    # rerouting from stampeding everyone to the same exit.
+                    current_queue = self._exit_counts.get((ex, ey), 0)
+                    incoming = self._blackboard.get_incoming_count(
+                        [ex, ey], self._tick,
+                        exclude_guide=self._guide_id,
+                    )
+                    cong = (current_queue + incoming) * 30.0
                     s_pen = smoke.get_density_at(ex, ey) * 200.0
                     f_pen = 0
                     if fg is not None:
@@ -620,7 +684,14 @@ class RouterGuide(Guide):
             # Score current exit
             cx, cy = self._escort_exit
             cur_dist = np.hypot(self.pos[0] - cx, self.pos[1] - cy)
-            cur_cong = self._exit_counts.get((cx, cy), 0) * 30.0
+            # A1 — effective congestion = current queue + incoming from
+            # OTHER Routers (self excluded, so our own group is not counted
+            # against our current target).
+            cur_queue = self._exit_counts.get((cx, cy), 0)
+            cur_incoming = self._blackboard.get_incoming_count(
+                [cx, cy], self._tick, exclude_guide=self._guide_id,
+            )
+            cur_cong = (cur_queue + cur_incoming) * 30.0
             cur_smoke = smoke.get_density_at(cx, cy) * 200.0
             cur_score = cur_dist + cur_cong + cur_smoke
 
@@ -629,7 +700,12 @@ class RouterGuide(Guide):
                 if (ex, ey) == self._escort_exit:
                     continue
                 dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-                cong = self._exit_counts.get((ex, ey), 0) * 30.0
+                # A1 — same effective-congestion adjustment for candidates
+                cand_queue = self._exit_counts.get((ex, ey), 0)
+                cand_incoming = self._blackboard.get_incoming_count(
+                    [ex, ey], self._tick, exclude_guide=self._guide_id,
+                )
+                cong = (cand_queue + cand_incoming) * 30.0
                 s_pen = smoke.get_density_at(ex, ey) * 200.0
                 f_pen = 0
                 if fg is not None:
@@ -664,6 +740,10 @@ class RouterGuide(Guide):
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
                 if dist < env.cell_size * 2:
+                    # A1 — arrived; group is now at the exit (joining the
+                    # queue), no longer "incoming." Release the exit claim
+                    # so other Routers stop penalising this exit.
+                    self._blackboard.release_exit_claim(self._guide_id)
                     self._phase = self.RELEASING
                     self._release_wait = 0
                     self.vel = np.zeros(2)
@@ -1102,7 +1182,14 @@ class RouterGuide(Guide):
         best_exit, best_score = None, float("inf")
         for ex, ey in self.known_exits:
             dist = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-            congestion = self._exit_counts.get((ex, ey), 0) * 30.0
+            # A1 — effective congestion = current queue + incoming from
+            # OTHER Routers (self excluded). Router about to pick an exit
+            # sees pending arrivals from peers and avoids pile-ups.
+            current_queue = self._exit_counts.get((ex, ey), 0)
+            incoming = self._blackboard.get_incoming_count(
+                [ex, ey], self._tick, exclude_guide=self._guide_id,
+            )
+            congestion = (current_queue + incoming) * 30.0
             # Use predicted smoke/fire at exit (will it be safe when we arrive?)
             er, ec = env.world_to_grid(ex, ey)
             smoke_pen = 0
