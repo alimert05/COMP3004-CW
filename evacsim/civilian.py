@@ -116,13 +116,41 @@ class Civilian:
         in_smoke = local_smoke > 0.3
         in_fire = local_fire > 0.1
 
-        # ── IDLE: wait for danger ──
+        # ── IDLE: slow ambient movement + wait for danger ──
+        # Pre-evacuation period (Proulx 2001): civilians are not yet
+        # aware of the emergency, so they move at a CASUAL pace without
+        # any destination — modelling normal office activity (walking
+        # between desks/bathroom/colleagues). They do NOT detect exits
+        # (early return below bypasses exit-spotting logic) but they
+        # DO notice fire/smoke/fleeing others through the triggers below,
+        # which is how pre-evacuation transitions happen in real life.
+        # IDLE civilians are also EXCLUDED from being seen as "fleeing"
+        # by others (line ~610 in _see_others_fleeing), so their ambient
+        # movement does not cause cascading false alarms.
         if self.state == IDLE:
+            # Alert triggers — same as before
             if (in_fire or in_smoke
                     or self._sense_danger(env, smoke, fire)
                     or self._see_others_fleeing(all_civilians)):
                 self.state = REACTING
                 self._reaction_counter = 0
+                return
+
+            # Ambient movement: slow casual pace (0.3× normal speed).
+            # Much slower than evacuating civilians (1.5 unit/tick) so the
+            # visual distinction remains clear and so IDLE civilians do not
+            # accidentally reach an exit cell before realising the danger.
+            idle_speed = self.speed * 0.3
+
+            # Occasional direction change — natural-looking ambient motion.
+            # 2% chance per tick ≈ change direction every ~50 ticks.
+            if self._walk_dir is None or self._rng.random() < 0.02:
+                self._pick_random_cardinal()
+
+            # Random walk sets self.vel; _move applies wall collision +
+            # separation from other civilians (reused existing logic).
+            self._do_random_walk(env, idle_speed, local_smoke)
+            self._move(env, idle_speed, all_civilians)
             return
 
         # ── Rule 5: Potency damage (no recovery) ──
@@ -274,8 +302,16 @@ class Civilian:
             else:
                 dist_to_guide = np.linalg.norm(self.pos - guide.pos)
 
-                # Too far for too long? Give up
-                if dist_to_guide > env.cell_size * 20 and self._stuck_ticks >= 8:
+                # Give up following if:
+                # (a) far from guide for too long (lost in corridors), OR
+                # (b) stuck for a long time regardless of distance (pinned
+                #     against a wall next to guide — neither can move).
+                # Without case (b), pinned civilians could stay in
+                # FOLLOWING_GUIDE forever until they die of smoke.
+                far_and_stuck = (dist_to_guide > env.cell_size * 20
+                                 and self._stuck_ticks >= 8)
+                long_stuck = self._stuck_ticks >= 30
+                if far_and_stuck or long_stuck:
                     try:
                         guide._group.remove(self)
                     except ValueError:
@@ -428,9 +464,13 @@ class Civilian:
         BFS handles navigation. Boids handles group spacing.
         """
         # ── COHESION via BFS (not direct vector) ──
-        # Recompute path every 8 ticks or when cache is empty
+        # Recompute path every 8 ticks. NOTE: we intentionally do NOT also
+        # recompute when cache is empty — an empty cache (BFS returned no
+        # path) would otherwise cause BFS to run every single tick, which
+        # is O(rows*cols) per civilian per tick when the guide is
+        # unreachable. Strict 8-tick throttle keeps cost bounded.
         self._boids_bfs_tick += 1
-        if not self._boids_bfs_cache or self._boids_bfs_tick >= 8:
+        if self._boids_bfs_tick >= 8:
             self._boids_bfs_tick = 0
             fg = getattr(self, '_fire_grid', None)
             self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)

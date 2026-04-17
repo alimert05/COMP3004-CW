@@ -24,12 +24,15 @@ import os
 import sys
 import csv
 import time
+import zlib
 import argparse
 from multiprocessing import Pool, cpu_count
 from itertools import product
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Resolve project root (parent of this file's directory) so map paths and
+# module imports work regardless of the cwd the runner is launched from.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJECT_ROOT)
 
 from config import SimConfig
 from evacsim.simulation import run_single
@@ -67,6 +70,21 @@ CROWD_SIZES = [50, 100, 150]
 N_TRIALS = 30
 
 
+def _deterministic_seed(map_file: str, fire_pos: str, policy: str,
+                        n_civ: int, trial: int) -> int:
+    """Generate a deterministic seed from the condition key.
+
+    Python's built-in hash() is randomised per-process (PEP 456, on by
+    default since Python 3.3), so re-running the experiment in a fresh
+    process produces different seeds — breaking reproducibility across
+    sessions. zlib.crc32 is deterministic across Python processes,
+    sessions, and Python versions, giving us stable seeds for any future
+    re-run or replication.
+    """
+    key = f"{map_file}|{fire_pos}|{policy}|{n_civ}|{trial}".encode("utf-8")
+    return zlib.crc32(key) % (2**31)
+
+
 def build_configs(maps=None, fire_positions=None, policies=None,
                   crowd_sizes=None, n_trials=None):
     """Generate all SimConfig combinations."""
@@ -79,10 +97,16 @@ def build_configs(maps=None, fire_positions=None, policies=None,
     configs = []
     for map_file, fire_pos, policy, n_civ in product(
             maps, fire_positions, policies, crowd_sizes):
+        # Resolve relative map paths to absolute (anchored to project root)
+        # so the simulation works regardless of launch cwd.
+        resolved_map = (
+            map_file if os.path.isabs(map_file)
+            else os.path.join(PROJECT_ROOT, map_file)
+        )
         for trial in range(n_trials):
-            seed = hash((map_file, fire_pos, policy, n_civ, trial)) % (2**31)
+            seed = _deterministic_seed(map_file, fire_pos, policy, n_civ, trial)
             config = SimConfig(
-                map_file=map_file,
+                map_file=resolved_map,
                 fire_position=fire_pos,
                 guide_policy=policy,
                 n_civilians=n_civ,
@@ -91,6 +115,8 @@ def build_configs(maps=None, fire_positions=None, policies=None,
             )
             # Store trial number for CSV
             config._trial = trial
+            # Store the relative map path for readable CSV output
+            config._map_display = map_file
             configs.append(config)
 
     return configs
@@ -98,13 +124,17 @@ def build_configs(maps=None, fire_positions=None, policies=None,
 
 def run_and_label(config):
     """Run one simulation, return result dict with trial info."""
+    # Prefer the readable relative path for CSV display
+    map_display = getattr(config, "_map_display", config.map_file)
     try:
         result = run_single(config)
+        result["map"] = map_display  # overwrite absolute path with readable relative
         result["trial"] = getattr(config, "_trial", 0)
+        result["error"] = ""  # keep column present for streaming CSV schema
         return result
     except Exception as e:
         return {
-            "map": config.map_file,
+            "map": map_display,
             "fire_position": config.fire_position,
             "policy": config.guide_policy,
             "n_civilians": config.n_civilians,
@@ -120,9 +150,30 @@ def run_and_label(config):
         }
 
 
+# CSV schema — includes every field we ever emit. Defined at module level so
+# it's stable across the streaming-write path (no "column added later" case).
+CSV_FIELDNAMES = [
+    "map", "fire_position", "policy", "n_civilians", "trial", "seed",
+    "TV", "TM", "MP", "MT", "survival_rate", "evacuation_time",
+    "still_alive", "total_civilians", "n_guides", "guides_survived",
+    # Evacuation-curve bins (count of civilians who escaped in each
+    # 500-tick window, used to build cumulative escape curves)
+    "escaped_0_500", "escaped_500_1000", "escaped_1000_1500",
+    "escaped_1500_2000", "escaped_2000_2500", "escaped_2500_3000",
+    # Always include the error column so a late-appearing error doesn't
+    # break the streaming writer. Blank for successful runs.
+    "error",
+]
+
+
 def run_experiment(configs, output_file="results/experiment_results.csv",
                    n_workers=None):
-    """Run all configs in parallel, save to CSV."""
+    """Run all configs in parallel, streaming results to CSV as they complete.
+
+    Streaming writes + per-row flush = durable checkpointing: if the run
+    crashes (power cut, OOM, Ctrl-C) at any point, everything completed so
+    far is already on disk. No 7-hour data loss risk.
+    """
     n_workers = n_workers or max(1, cpu_count() - 1)
     total = len(configs)
 
@@ -134,48 +185,41 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
     os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
     start = time.time()
-    results = []
     completed = 0
+    results = []  # retained for API compatibility (returned to caller)
 
-    with Pool(processes=n_workers) as pool:
-        for result in pool.imap_unordered(run_and_label, configs, chunksize=4):
-            results.append(result)
-            completed += 1
-            if completed % 50 == 0 or completed == total:
-                elapsed = time.time() - start
-                rate = completed / elapsed if elapsed > 0 else 0
-                eta = (total - completed) / rate if rate > 0 else 0
-                print(f"  [{completed}/{total}] "
-                      f"{elapsed:.0f}s elapsed, "
-                      f"{rate:.1f} runs/s, "
-                      f"ETA: {eta:.0f}s")
+    # Open CSV once, write header, then stream each row as it arrives.
+    with open(output_file, "w", newline="", encoding="utf-8") as csv_f:
+        writer = csv.DictWriter(csv_f, fieldnames=CSV_FIELDNAMES,
+                                 extrasaction="ignore")
+        writer.writeheader()
+        csv_f.flush()
+
+        with Pool(processes=n_workers) as pool:
+            for result in pool.imap_unordered(
+                run_and_label, configs, chunksize=4
+            ):
+                # Durability: flush per row so a crash preserves all
+                # completed runs. ~2 rows/sec flush cost is negligible.
+                writer.writerow(result)
+                csv_f.flush()
+                os.fsync(csv_f.fileno())
+
+                results.append(result)
+                completed += 1
+                if completed % 50 == 0 or completed == total:
+                    elapsed = time.time() - start
+                    rate = completed / elapsed if elapsed > 0 else 0
+                    eta = (total - completed) / rate if rate > 0 else 0
+                    print(f"  [{completed}/{total}] "
+                          f"{elapsed:.0f}s elapsed, "
+                          f"{rate:.1f} runs/s, "
+                          f"ETA: {eta:.0f}s")
 
     elapsed = time.time() - start
     print(f"\nDone! {total} runs in {elapsed:.1f}s "
           f"({total/elapsed:.1f} runs/s)")
-
-    # Save to CSV
-    if results:
-        fieldnames = [
-            "map", "fire_position", "policy", "n_civilians", "trial", "seed",
-            "TV", "TM", "MP", "MT", "survival_rate", "evacuation_time",
-            "still_alive", "total_civilians", "n_guides", "guides_survived",
-            # Evacuation-curve bins (count of civilians who escaped in each
-            # 500-tick window, used to build cumulative escape curves)
-            "escaped_0_500", "escaped_500_1000", "escaped_1000_1500",
-            "escaped_1500_2000", "escaped_2000_2500", "escaped_2500_3000",
-        ]
-        # Add error field if any errors
-        if any("error" in r for r in results):
-            fieldnames.append("error")
-
-        with open(output_file, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames,
-                                     extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(results)
-
-        print(f"Saved to {output_file}")
+    print(f"Saved to {output_file}")
 
     return results
 
