@@ -1,0 +1,47 @@
+======================================================================
+EVACUATION EXPERIMENT ANALYSIS SUMMARY
+Total runs analysed: 4
+Maps: 1 | Policies: 4 | Crowd sizes: 1 | Fire positions: 1
+======================================================================
+
+-- SURVIVAL RATE BY POLICY (overall) --
+  none      mean=0.030  SD=nan  95% CI+/-nan  n=1
+  beacon    mean=0.320  SD=nan  95% CI+/-nan  n=1
+  sweeper   mean=0.650  SD=nan  95% CI+/-nan  n=1
+  router    mean=0.800  SD=nan  95% CI+/-nan  n=1
+
+-- ONE-WAY ANOVA RESULTS --
+  survival_rate: Not enough data for ANOVA
+  MP: Not enough data for ANOVA
+  MT: Not enough data for ANOVA
+  guides_survived: Not enough data for ANOVA
+
+-- TUKEY HSD PAIRWISE COMPARISONS (survival_rate) --
+  (Tukey unavailable - statsmodels missing?)
+
+-- SURVIVAL BY MAP TYPE x POLICY --
+  bottleneck:
+    none      mean=0.030  SD=nan  95% CI+/-nan
+    beacon    mean=0.320  SD=nan  95% CI+/-nan
+    sweeper   mean=0.650  SD=nan  95% CI+/-nan
+    router    mean=0.800  SD=nan  95% CI+/-nan
+  open_plan:
+
+-- SURVIVAL BY CROWD SIZE x POLICY --
+  none:
+    n=100   mean=0.030  SD=nan  95% CI+/-nan
+  beacon:
+    n=100   mean=0.320  SD=nan  95% CI+/-nan
+  sweeper:
+    n=100   mean=0.650  SD=nan  95% CI+/-nan
+  router:
+    n=100   mean=0.800  SD=nan  95% CI+/-nan
+
+-- BEST POLICY PER MAP (by mean survival) --
+  bottleneck_A: best=router (0.800), worst=none (0.030)
+
+======================================================================
+Symbols: * p<0.05   ** p<0.01   *** p<0.001
+Cohen's d: 0.2=small, 0.5=medium, 0.8=large
+eta2 (eta-squared): 0.01=small, 0.06=medium, 0.14=large
+======================================================================

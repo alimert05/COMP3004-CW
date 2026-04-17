@@ -141,6 +141,7 @@ class Simulation:
             if civ._target_exit is None:
                 # No target exit — just escape
                 civ.state = ESCAPED
+                civ.escape_tick = self.tick
                 continue
 
             tx, ty = civ._target_exit
@@ -167,6 +168,7 @@ class Simulation:
                 if rank < throughput:
                     # This civilian escapes this tick
                     self.civilians[civ_idx].state = ESCAPED
+                    self.civilians[civ_idx].escape_tick = self.tick
                 # Others stay QUEUED — will try again next tick
 
     def run(self) -> dict:
@@ -190,6 +192,18 @@ class Simulation:
         result["guides_survived"] = sum(
             1 for g in self.guides if g.alive or getattr(g, "escaped", False)
         )
+
+        # Escape-tick bins for evacuation curves (6 bins × 500 ticks each,
+        # covering 0-3000 tick range). Each bin holds the count of civilians
+        # who escaped in that time window. Used in analysis to compute
+        # cumulative "% escaped over time" curves per policy.
+        bin_edges = [0, 500, 1000, 1500, 2000, 2500, 3000]
+        escape_ticks = [
+            c.escape_tick for c in self.civilians if c.escape_tick is not None
+        ]
+        for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+            count = sum(1 for t in escape_ticks if lo <= t < hi)
+            result[f"escaped_{lo}_{hi}"] = count
 
         return result
 

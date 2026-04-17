@@ -1,0 +1,7 @@
+,,survival_rate,survival_rate,survival_rate,TV,TV,TV,TM,TM,TM,MP,MP,MP,MT,MT,MT,guides_survived,guides_survived,guides_survived
+,,mean,std,_ci95,mean,std,_ci95,mean,std,_ci95,mean,std,_ci95,mean,std,_ci95,mean,std,_ci95
+policy,map_type,,,,,,,,,,,,,,,,,,
+none,bottleneck,0.03,,,3.0,,,97.0,,,76.63,,,181.33,,,0.0,,
+beacon,bottleneck,0.32,,,32.0,,,68.0,,,73.54,,,170.12,,,4.0,,
+sweeper,bottleneck,0.65,,,65.0,,,35.0,,,77.47,,,368.09,,,4.0,,
+router,bottleneck,0.8,,,80.0,,,20.0,,,74.42,,,426.84,,,4.0,,

@@ -1,0 +1,63 @@
+======================================================================
+ONE-WAY ANOVA RESULTS
+======================================================================
+
+Metric: survival_rate
+  F = 548.3175
+  p = 1.83929e-41
+  eta² = 0.9671 (large)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=15     mean=0.0513  SD=0.0268
+    beacon    n=15     mean=0.3242  SD=0.0674
+    sweeper   n=15     mean=0.6753  SD=0.0604
+    router    n=15     mean=0.7731  SD=0.0559
+
+Metric: MP
+  F = 2.5052
+  p = 0.0683497
+  eta² = 0.1183 (medium)
+  Significant at p<0.05: False
+  Group stats:
+    none      n=15     mean=69.0007  SD=9.7466
+    beacon    n=15     mean=73.6773  SD=2.8087
+    sweeper   n=15     mean=72.3240  SD=2.2758
+    router    n=15     mean=73.4653  SD=1.9395
+
+Metric: MT
+  F = 10.9286
+  p = 9.40515e-06
+  eta² = 0.3693 (large)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=15     mean=354.3873  SD=193.3244
+    beacon    n=15     mean=206.3547  SD=55.9802
+    sweeper   n=15     mean=384.4860  SD=41.5007
+    router    n=15     mean=425.2120  SD=87.7223
+
+Metric: guides_survived
+  F = inf
+  p = 0
+  eta² = 1.0000 (large)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=15     mean=0.0000  SD=0.0000
+    beacon    n=15     mean=4.0000  SD=0.0000
+    sweeper   n=15     mean=4.0000  SD=0.0000
+    router    n=15     mean=4.0000  SD=0.0000
+
+
+======================================================================
+TWO-WAY ANOVA RESULTS
+======================================================================
+
+── survival_rate ~ policy × map_type ──
+ANOVA failed: must have at least one row in constraint matrix
+
+── survival_rate ~ policy × n_civilians ──
+                            sum_sq    df           F        PR(>F)
+C(policy)                 4.946809   3.0  663.309696  4.715627e-39
+C(n_civilians)            0.004359   2.0    0.876657  4.227285e-01
+C(policy):C(n_civilians)  0.044724   6.0    2.998484  1.435426e-02
+Residual                  0.119324  48.0         NaN           NaN
+

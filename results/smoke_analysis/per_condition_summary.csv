@@ -1,0 +1,5 @@
+map_name,fire_position,policy,n_civilians,n_trials,TV_mean,TV_std,TV_min,TV_max,TM_mean,TM_std,TM_min,TM_max,MP_mean,MP_std,MP_min,MP_max,MT_mean,MT_std,MT_min,MT_max,survival_rate_mean,survival_rate_std,survival_rate_min,survival_rate_max,evacuation_time_mean,evacuation_time_std,evacuation_time_min,evacuation_time_max,guides_survived_mean,guides_survived_std,guides_survived_min,guides_survived_max
+bottleneck_A,center,none,100,1,3.0,,3,3,97.0,,97,97,76.63,,76.63,76.63,181.33,,181.33,181.33,0.03,,0.03,0.03,2545.0,,2545,2545,0.0,,0,0
+bottleneck_A,center,beacon,100,1,32.0,,32,32,68.0,,68,68,73.54,,73.54,73.54,170.12,,170.12,170.12,0.32,,0.32,0.32,2510.0,,2510,2510,4.0,,4,4
+bottleneck_A,center,sweeper,100,1,65.0,,65,65,35.0,,35,35,77.47,,77.47,77.47,368.09,,368.09,368.09,0.65,,0.65,0.65,2122.0,,2122,2122,4.0,,4,4
+bottleneck_A,center,router,100,1,80.0,,80,80,20.0,,20,20,74.42,,74.42,74.42,426.84,,426.84,426.84,0.8,,0.8,0.8,1847.0,,1847,1847,4.0,,4,4

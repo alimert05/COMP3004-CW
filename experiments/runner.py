@@ -115,6 +115,8 @@ def run_and_label(config):
             "survival_rate": 0, "evacuation_time": 0,
             "still_alive": 0, "total_civilians": config.n_civilians,
             "n_guides": 0, "guides_survived": 0,
+            "escaped_0_500": 0, "escaped_500_1000": 0, "escaped_1000_1500": 0,
+            "escaped_1500_2000": 0, "escaped_2000_2500": 0, "escaped_2500_3000": 0,
         }
 
 
@@ -158,6 +160,10 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
             "map", "fire_position", "policy", "n_civilians", "trial", "seed",
             "TV", "TM", "MP", "MT", "survival_rate", "evacuation_time",
             "still_alive", "total_civilians", "n_guides", "guides_survived",
+            # Evacuation-curve bins (count of civilians who escaped in each
+            # 500-tick window, used to build cumulative escape curves)
+            "escaped_0_500", "escaped_500_1000", "escaped_1000_1500",
+            "escaped_1500_2000", "escaped_2000_2500", "escaped_2500_3000",
         ]
         # Add error field if any errors
         if any("error" in r for r in results):
@@ -177,9 +183,11 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
 def main():
     parser = argparse.ArgumentParser(description="Run evacuation experiments")
     parser.add_argument("--smoke", action="store_true",
-                        help="Smoke test: 1 map, 1 fire, 4 policies, 1 size, 1 trial = 4 runs")
+                        help="Smoke: 1 map, 1 fire, 4 policies, 1 size, 1 trial = 4 runs")
     parser.add_argument("--quick", action="store_true",
                         help="Quick: 1 map, 1 fire, 4 policies, 3 sizes, 5 trials = 60 runs")
+    parser.add_argument("--pilot", action="store_true",
+                        help="Pilot: 8 maps, 1 fire, 4 policies, 3 sizes, 3 trials = 288 runs (all map types)")
     parser.add_argument("--medium", action="store_true",
                         help="Medium: 1 map, 5 fire, 4 policies, 3 sizes, 10 trials = 600 runs")
     parser.add_argument("--policy", type=str, default=None,
@@ -210,6 +218,15 @@ def main():
             n_trials=5,
         )
         print(f"QUICK TEST: {len(configs)} runs")
+    elif args.pilot:
+        configs = build_configs(
+            maps=MAPS,  # All 8 maps
+            fire_positions=["center"],
+            policies=POLICIES,
+            crowd_sizes=CROWD_SIZES,
+            n_trials=3,
+        )
+        print(f"PILOT TEST: {len(configs)} runs (all maps, center fire, 3 trials)")
     elif args.medium:
         configs = build_configs(
             maps=["maps/bottleneck_A.txt"],

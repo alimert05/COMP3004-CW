@@ -56,6 +56,11 @@ class Civilian:
 
         self.state = IDLE
 
+        # Escape tracking: tick at which this civilian transitions to ESCAPED.
+        # Remains None if the civilian never escapes (died or still in building).
+        # Used for evacuation-curve analysis (cumulative escape rate over time).
+        self.escape_tick = None
+
         # Reaction delay: 0.5-2s at 30fps (Proulx 2001)
         self._reaction_delay = int(rng.uniform(15, 60))
         self._reaction_counter = 0

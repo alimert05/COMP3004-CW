@@ -1,0 +1,27 @@
+======================================================================
+ONE-WAY ANOVA RESULTS
+======================================================================
+
+Metric: survival_rate
+  Not enough data for ANOVA
+
+Metric: MP
+  Not enough data for ANOVA
+
+Metric: MT
+  Not enough data for ANOVA
+
+Metric: guides_survived
+  Not enough data for ANOVA
+
+
+======================================================================
+TWO-WAY ANOVA RESULTS
+======================================================================
+
+── survival_rate ~ policy × map_type ──
+statsmodels not installed — 2-way ANOVA skipped
+
+── survival_rate ~ policy × n_civilians ──
+statsmodels not installed — 2-way ANOVA skipped
+

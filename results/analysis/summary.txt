@@ -1,0 +1,60 @@
+======================================================================
+EVACUATION EXPERIMENT ANALYSIS SUMMARY
+Total runs analysed: 60
+Maps: 1 | Policies: 4 | Crowd sizes: 3 | Fire positions: 1
+======================================================================
+
+-- SURVIVAL RATE BY POLICY (overall) --
+  none      mean=0.051  SD=0.027  95% CI+/-0.014  n=15
+  beacon    mean=0.324  SD=0.067  95% CI+/-0.034  n=15
+  sweeper   mean=0.675  SD=0.060  95% CI+/-0.031  n=15
+  router    mean=0.773  SD=0.056  95% CI+/-0.028  n=15
+
+-- ONE-WAY ANOVA RESULTS --
+  survival_rate       F= 548.32  p=1.839e-41  eta2=0.967 (large)  -> SIGNIFICANT
+  MP                  F=   2.51  p=0.06835  eta2=0.118 (medium)  -> not significant
+  MT                  F=  10.93  p=9.405e-06  eta2=0.369 (large)  -> SIGNIFICANT
+  guides_survived     F=    inf  p=0  eta2=1.000 (large)  -> SIGNIFICANT
+
+-- TUKEY HSD PAIRWISE COMPARISONS (survival_rate) --
+  beacon   vs none      diff=-0.273  p=0 ***  d=+5.32 (large)
+  beacon   vs router    diff=+0.449  p=0 ***  d=-7.25 (large)
+  beacon   vs sweeper   diff=+0.351  p=0 ***  d=-5.49 (large)
+  none     vs router    diff=+0.722  p=0 ***  d=-16.46 (large)
+  none     vs sweeper   diff=+0.624  p=0 ***  d=-13.36 (large)
+  router   vs sweeper   diff=-0.098  p=0.0001 ***  d=+1.68 (large)
+
+-- SURVIVAL BY MAP TYPE x POLICY --
+  bottleneck:
+    none      mean=0.051  SD=0.027  95% CI+/-0.014
+    beacon    mean=0.324  SD=0.067  95% CI+/-0.034
+    sweeper   mean=0.675  SD=0.060  95% CI+/-0.031
+    router    mean=0.773  SD=0.056  95% CI+/-0.028
+  open_plan:
+
+-- SURVIVAL BY CROWD SIZE x POLICY --
+  none:
+    n=50    mean=0.060  SD=0.032  95% CI+/-0.028
+    n=100   mean=0.058  SD=0.031  95% CI+/-0.027
+    n=150   mean=0.036  SD=0.010  95% CI+/-0.009
+  beacon:
+    n=50    mean=0.276  SD=0.078  95% CI+/-0.068
+    n=100   mean=0.346  SD=0.058  95% CI+/-0.051
+    n=150   mean=0.351  SD=0.046  95% CI+/-0.040
+  sweeper:
+    n=50    mean=0.724  SD=0.033  95% CI+/-0.029
+    n=100   mean=0.674  SD=0.055  95% CI+/-0.049
+    n=150   mean=0.628  SD=0.053  95% CI+/-0.047
+  router:
+    n=50    mean=0.744  SD=0.086  95% CI+/-0.076
+    n=100   mean=0.794  SD=0.026  95% CI+/-0.023
+    n=150   mean=0.781  SD=0.033  95% CI+/-0.029
+
+-- BEST POLICY PER MAP (by mean survival) --
+  bottleneck_A: best=router (0.773), worst=none (0.051)
+
+======================================================================
+Symbols: * p<0.05   ** p<0.01   *** p<0.001
+Cohen's d: 0.2=small, 0.5=medium, 0.8=large
+eta2 (eta-squared): 0.01=small, 0.06=medium, 0.14=large
+======================================================================

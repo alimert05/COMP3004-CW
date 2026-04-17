@@ -1,5 +1,5 @@
-map,fire_position,policy,n_civilians,trial,seed,TV,TM,MP,MT,survival_rate,evacuation_time,still_alive,total_civilians,n_guides,guides_survived
-maps/bottleneck_A.txt,center,none,100,0,1793049594,5,95,62.61,379.2,0.05,2632,0,100,0,0
-maps/bottleneck_A.txt,center,beacon,100,0,1569126962,33,67,76.65,211.06,0.33,2575,0,100,4,4
-maps/bottleneck_A.txt,center,sweeper,100,0,488325416,66,34,74.21,340.02,0.66,1775,0,100,4,4
-maps/bottleneck_A.txt,center,router,100,0,31981238,74,26,74.8,404.57,0.74,1758,0,100,4,4
+map,fire_position,policy,n_civilians,trial,seed,TV,TM,MP,MT,survival_rate,evacuation_time,still_alive,total_civilians,n_guides,guides_survived,escaped_0_500,escaped_500_1000,escaped_1000_1500,escaped_1500_2000,escaped_2000_2500,escaped_2500_3000
+maps/bottleneck_A.txt,center,none,100,0,287194982,3,97,76.63,181.33,0.03,2545,0,100,0,0,0,0,3,0,0,0
+maps/bottleneck_A.txt,center,beacon,100,0,21457752,32,68,73.54,170.12,0.32,2510,0,100,4,4,24,3,3,2,0,0
+maps/bottleneck_A.txt,center,sweeper,100,0,895345194,65,35,77.47,368.09,0.65,2122,0,100,4,4,16,36,13,0,0,0
+maps/bottleneck_A.txt,center,router,100,0,212882900,80,20,74.42,426.84,0.8,1847,0,100,4,4,7,62,11,0,0,0
