@@ -6,7 +6,7 @@ from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
 from evacsim.guides.base import Guide
-from evacsim.guides.common import bfs_path
+from evacsim.guides.common import bfs_path, dijkstra_congestion_path
 
 
 def _find_patrol_points(env: Environment):
@@ -587,20 +587,43 @@ class SweeperGuide(Guide):
 
         self._escort_exit = best_exit
         if best_exit:
-            # Escorting group — smoke is full danger (civilians vulnerable)
-            # Must match _follow_path's reroute weight (sg * 1.0 when has_group)
+            # Escorting group — smoke is full danger (civilians vulnerable).
+            # Must match _follow_path's reroute weight (sg * 1.0 when has_group).
+            # Fire ×3 so 0.3 threshold matches 0.1 fire-damage onset.
             sg = getattr(self, "_smoke_grid", None)
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 1.0)
+                danger = np.maximum(fg * 3, sg * 1.0)
             elif fg is not None:
-                danger = fg
+                danger = fg * 3
             elif sg is not None:
                 danger = sg * 1.0
             else:
                 danger = None
-            self._waypoints = bfs_path(
-                env, self.pos, np.array(best_exit), fire_grid=danger
+            # SAFETY UPGRADE — Dijkstra prefers genuinely cleaner routes via
+            # cost weighting (fire*20, smoke*5); validator rejects any path
+            # with a waypoint > 0.3; BFS fallback gives the safety guarantee.
+            # civilian_density=None — congestion awareness stays Router-only.
+            dij_path = dijkstra_congestion_path(
+                env, self.pos, np.array(best_exit),
+                fire_grid=fg, smoke_grid=sg,
+                civilian_density=None,
             )
+            dij_safe = True
+            if dij_path and danger is not None:
+                for wp in dij_path:
+                    wr, wc = env.world_to_grid(wp[0], wp[1])
+                    if (0 <= wr < danger.shape[0]
+                            and 0 <= wc < danger.shape[1]):
+                        if danger[wr, wc] > 0.3:
+                            dij_safe = False
+                            break
+            if dij_path and dij_safe:
+                self._waypoints = dij_path
+            else:
+                self._waypoints = bfs_path(
+                    env, self.pos, np.array(best_exit),
+                    fire_grid=danger,
+                )
 
     # _release_group_at_exit removed — replaced by _do_releasing phase
     # Guide now waits at exit and releases civilians one by one as they arrive
@@ -664,30 +687,58 @@ class SweeperGuide(Guide):
         self._patrol_idx = 0
         self._cycle_start_idx = 0
 
-        # Compute waypoints to new first point (danger-aware)
+        # Compute waypoints to new first point (danger-aware).
+        # Fire ×3 so 0.3 threshold matches 0.1 fire-damage onset.
         fg = getattr(self, "_fire_grid", None)
         sg = getattr(self, "_smoke_grid", None)
         if self._group:
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 1.0)
+                danger = np.maximum(fg * 3, sg * 1.0)
             elif fg is not None:
-                danger = fg
+                danger = fg * 3
             elif sg is not None:
                 danger = sg * 1.0
             else:
                 danger = None
         else:
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 0.3)
+                danger = np.maximum(fg * 3, sg * 0.3)
             elif fg is not None:
-                danger = fg
+                danger = fg * 3
             elif sg is not None:
                 danger = sg * 0.3
             else:
                 danger = None
-        self._waypoints = bfs_path(
-            env, self.pos, self._patrol_route[0], fire_grid=danger
-        )
+
+        if self._group:
+            # SAFETY UPGRADE — with civilians, use Dijkstra+validator+BFS
+            # fallback (prefer cleaner paths, guarantee no cell > 0.3).
+            dij_path = dijkstra_congestion_path(
+                env, self.pos, self._patrol_route[0],
+                fire_grid=fg, smoke_grid=sg,
+                civilian_density=None,
+            )
+            dij_safe = True
+            if dij_path and danger is not None:
+                for wp in dij_path:
+                    wr, wc = env.world_to_grid(wp[0], wp[1])
+                    if (0 <= wr < danger.shape[0]
+                            and 0 <= wc < danger.shape[1]):
+                        if danger[wr, wc] > 0.3:
+                            dij_safe = False
+                            break
+            if dij_path and dij_safe:
+                self._waypoints = dij_path
+            else:
+                self._waypoints = bfs_path(
+                    env, self.pos, self._patrol_route[0],
+                    fire_grid=danger,
+                )
+        else:
+            # Solo patrol movement — BFS (fast, sufficient)
+            self._waypoints = bfs_path(
+                env, self.pos, self._patrol_route[0], fire_grid=danger
+            )
         return True
 
     def _advance_patrol(self, env):
@@ -730,12 +781,13 @@ class SweeperGuide(Guide):
             if not is_dangerous:
                 break  # Found a safe patrol point
 
-        # Compute path — avoid smoke if carrying group, light smoke avoidance solo
+        # Compute path — avoid smoke if carrying group, light smoke avoidance solo.
+        # Fire ×3 so 0.3 threshold matches 0.1 fire-damage onset.
         if self._group:
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 1.0)
+                danger = np.maximum(fg * 3, sg * 1.0)
             elif fg is not None:
-                danger = fg
+                danger = fg * 3
             elif sg is not None:
                 danger = sg * 1.0
             else:
@@ -743,16 +795,45 @@ class SweeperGuide(Guide):
         else:
             # Solo: avoid fire + light smoke (guides take smoke damage too)
             if fg is not None and sg is not None:
-                danger = np.maximum(fg, sg * 0.3)
+                danger = np.maximum(fg * 3, sg * 0.3)
             elif fg is not None:
-                danger = fg
+                danger = fg * 3
             elif sg is not None:
                 danger = sg * 0.3
             else:
                 danger = None
-        self._waypoints = bfs_path(
-            env, self.pos, self._patrol_route[self._patrol_idx], fire_grid=danger
-        )
+
+        if self._group:
+            # SAFETY UPGRADE — with civilians, use Dijkstra+validator+BFS
+            # fallback (prefer cleaner paths, guarantee no cell > 0.3).
+            target = self._patrol_route[self._patrol_idx]
+            dij_path = dijkstra_congestion_path(
+                env, self.pos, target,
+                fire_grid=fg, smoke_grid=sg,
+                civilian_density=None,
+            )
+            dij_safe = True
+            if dij_path and danger is not None:
+                for wp in dij_path:
+                    wr, wc = env.world_to_grid(wp[0], wp[1])
+                    if (0 <= wr < danger.shape[0]
+                            and 0 <= wc < danger.shape[1]):
+                        if danger[wr, wc] > 0.3:
+                            dij_safe = False
+                            break
+            if dij_path and dij_safe:
+                self._waypoints = dij_path
+            else:
+                self._waypoints = bfs_path(
+                    env, self.pos, target, fire_grid=danger,
+                )
+        else:
+            # Solo patrol movement — BFS (fast, sufficient)
+            self._waypoints = bfs_path(
+                env, self.pos,
+                self._patrol_route[self._patrol_idx],
+                fire_grid=danger,
+            )
 
 
 def spawn_sweeper_guides(

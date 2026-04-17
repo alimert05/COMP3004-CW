@@ -625,10 +625,12 @@ class RouterGuide(Guide):
                         break
             if guide_in_danger:
                 self._danger_reroute_tick = self._tick  # Start cooldown
+                # Danger grid: fire ×3 so 0.3 threshold matches 0.1 fire-
+                # damage onset (consistency with civilian damage model).
                 if fg is not None and sg is not None:
-                    danger = np.maximum(fg, sg * 1.0)
+                    danger = np.maximum(fg * 3, sg * 1.0)
                 elif fg is not None:
-                    danger = fg
+                    danger = fg * 3
                 elif sg is not None:
                     danger = sg * 1.0
                 else:
@@ -741,11 +743,13 @@ class RouterGuide(Guide):
                 if new_score < cur_score * 0.7:
                     self._escort_exit = (ex, ey)
                     # Build danger grid up-front — used both by the safety
-                    # validator below and by the BFS fallback.
+                    # validator below and by the BFS fallback. Fire ×3 so
+                    # the 0.3 threshold rejects fire > 0.1 (matching the
+                    # civilian fire-damage onset).
                     if fg is not None and sg is not None:
-                        danger = np.maximum(fg, sg * 1.0)
+                        danger = np.maximum(fg * 3, sg * 1.0)
                     elif fg is not None:
-                        danger = fg
+                        danger = fg * 3
                     elif sg is not None:
                         danger = sg * 1.0
                     else:
@@ -804,10 +808,12 @@ class RouterGuide(Guide):
                 # the last-resort fallback.
                 fg = getattr(self, "_fire_grid", None)
                 sg = getattr(self, "_smoke_grid", None)
+                # Danger grid: fire ×3 so the 0.3 threshold rejects
+                # fire > 0.1 (matches civilian fire-damage onset).
                 if fg is not None and sg is not None:
-                    danger = np.maximum(fg, sg * 1.0)
+                    danger = np.maximum(fg * 3, sg * 1.0)
                 elif fg is not None:
-                    danger = fg
+                    danger = fg * 3
                 elif sg is not None:
                     danger = sg * 1.0
                 else:
@@ -1275,11 +1281,13 @@ class RouterGuide(Guide):
 
         self._escort_exit = best_exit
         if best_exit:
-            # Build PREDICTED danger grid for path validation
+            # Build PREDICTED danger grid for path validation.
+            # Fire ×3 so the 0.3 threshold rejects predicted fire > 0.1
+            # (matching civilian fire-damage onset).
             if predicted_fg is not None and predicted_sg is not None:
-                danger = np.maximum(predicted_fg, predicted_sg * 1.0)
+                danger = np.maximum(predicted_fg * 3, predicted_sg * 1.0)
             elif predicted_fg is not None:
-                danger = predicted_fg
+                danger = predicted_fg * 3
             elif predicted_sg is not None:
                 danger = predicted_sg * 1.0
             else:
@@ -1354,12 +1362,14 @@ class RouterGuide(Guide):
     def _build_solo_danger_grid(self, fg, sg):
         """Build a danger grid for solo movement (no group).
         Guides have masks so smoke is less dangerous — use 0.3x weight.
-        Still avoid fire fully. This prevents guides repeatedly walking
-        through smoke to territory center and dying."""
+        Fire is scaled ×3 so the 0.3 threshold matches 0.1 fire-damage
+        onset (consistency with civilian damage model). This prevents
+        guides repeatedly walking through smoke to territory center and
+        dying."""
         if fg is not None and sg is not None:
-            return np.maximum(fg, sg * 0.3)
+            return np.maximum(fg * 3, sg * 0.3)
         elif fg is not None:
-            return fg
+            return fg * 3
         elif sg is not None:
             return sg * 0.3
         return None

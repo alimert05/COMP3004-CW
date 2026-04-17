@@ -220,9 +220,11 @@ class Guide:
                         needs_reroute = True
                         break
             if needs_reroute:
-                # Combine fire + smoke into danger grid for BFS avoidance
+                # Combine fire + smoke into danger grid for BFS avoidance.
+                # Fire is scaled ×3 so the 0.3 threshold rejects fire > 0.1,
+                # matching the civilian fire-damage onset threshold.
                 # When carrying a group: smoke is MORE dangerous (civilians vulnerable)
-                danger = fg if fg is not None else np.zeros_like(env.grid, dtype=float)
+                danger = (fg * 3.0) if fg is not None else np.zeros_like(env.grid, dtype=float)
                 if sg is not None:
                     smoke_weight = 1.0 if has_group else 0.5
                     danger = np.maximum(danger, sg * smoke_weight)
