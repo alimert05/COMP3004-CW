@@ -94,6 +94,9 @@ class Civilian:
         self.assigned_guide = None
         self._boids_bfs_cache = []  # Cached BFS path for boids wall fallback
         self._boids_bfs_tick = 0    # When cache was last updated
+        self._cached_guide_pos = None  # Guide position when cache was built
+                                       # (used for distance-based invalidation
+                                       # — see D1 fix in _hybrid_boids_follow)
 
     # ================================================================
     # MAIN UPDATE
@@ -470,14 +473,23 @@ class Civilian:
         BFS handles navigation. Boids handles group spacing.
         """
         # ── COHESION via BFS (not direct vector) ──
-        # Recompute path every 8 ticks. NOTE: we intentionally do NOT also
-        # recompute when cache is empty — an empty cache (BFS returned no
-        # path) would otherwise cause BFS to run every single tick, which
-        # is O(rows*cols) per civilian per tick when the guide is
-        # unreachable. Strict 8-tick throttle keeps cost bounded.
+        # Recompute path when EITHER trigger fires:
+        #   (a) 8 ticks elapsed since last recompute (time-based fallback)
+        #   (b) guide has moved > 2 cells since cache was built (D1 fix —
+        #       catches sharp turns and sprints that would otherwise leave
+        #       the civilian walking toward the guide's OLD position for
+        #       up to 8 ticks).
+        # NOTE: we intentionally do NOT also recompute when cache is empty —
+        # an empty cache (BFS returned no path) would otherwise cause BFS
+        # to run every single tick, which is O(rows*cols) per civilian per
+        # tick when the guide is unreachable.
         self._boids_bfs_tick += 1
-        if self._boids_bfs_tick >= 8:
+        guide_moved = 0.0
+        if self._cached_guide_pos is not None:
+            guide_moved = np.linalg.norm(guide.pos - self._cached_guide_pos)
+        if self._boids_bfs_tick >= 8 or guide_moved > env.cell_size * 2:
             self._boids_bfs_tick = 0
+            self._cached_guide_pos = guide.pos.copy()
             fg = getattr(self, '_fire_grid', None)
             self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)
 
