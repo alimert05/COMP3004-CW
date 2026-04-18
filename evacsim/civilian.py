@@ -157,9 +157,15 @@ class Civilian:
         # Applied BEFORE state-specific logic so that REACTING civilians
         # still take fire/smoke damage. Fire burns you whether you're
         # frozen in panic or not (Kasereka 2018).
+        # Fire and smoke damage STACK — both hazards affect the civilian
+        # independently. Using elif would produce the perverse result that
+        # a cell with mild fire + heavy smoke deals less damage than heavy
+        # smoke alone (fire triggers, smoke gets skipped). Additive matches
+        # physical reality: heat exposure and asphyxiation are separate
+        # injury mechanisms.
         if in_fire:
             self.potency -= 3.0 * local_fire
-        elif in_smoke:
+        if in_smoke:
             self.potency -= local_smoke
 
         if self.potency <= 0:

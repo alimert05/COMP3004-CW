@@ -1,0 +1,5 @@
+map,fire_position,policy,n_civilians,trial,seed,TV,TM,MP,MT,survival_rate,evacuation_time,still_alive,total_civilians,n_guides,guides_survived,escaped_0_500,escaped_500_1000,escaped_1000_1500,escaped_1500_2000,escaped_2000_2500,escaped_2500_3000,error
+maps/bottleneck_A.txt,center,none,100,0,2098932325,9,91,77.74,145.22,0.09,2543,0,100,0,0,3,6,0,0,0,0,
+maps/bottleneck_A.txt,center,beacon,100,0,1906189104,31,69,76.99,245.58,0.31,2670,0,100,4,4,9,14,8,0,0,0,
+maps/bottleneck_A.txt,center,sweeper,100,0,859885651,67,33,72.48,343.22,0.67,1983,0,100,4,4,21,29,15,2,0,0,
+maps/bottleneck_A.txt,center,router,100,0,1215525392,81,19,71.36,434.3,0.81,1745,0,100,4,4,11,42,27,1,0,0,

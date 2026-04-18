@@ -478,12 +478,18 @@ class SweeperGuide(Guide):
             IDLE,
             REACTING,
             FOLLOWING_GUIDE,
+            QUEUED,
         )
 
         for civ in civilians:
             if len(self._group) >= self._effective_max_group():
                 break
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+            # A3: skip QUEUED — civilian is at an exit about to escape;
+            # pulling them out of the queue would be unrealistic and
+            # creates an asymmetry with Router (Router already skips
+            # QUEUED in its recruit function).
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD,
+                             FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
@@ -516,10 +522,13 @@ class SweeperGuide(Guide):
             IDLE,
             REACTING,
             FOLLOWING_GUIDE,
+            QUEUED,
         )
 
         for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+            # A3: skip QUEUED — don't pull civilians out of exit lines
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD,
+                             FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
