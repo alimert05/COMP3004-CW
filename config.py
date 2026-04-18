@@ -32,8 +32,13 @@ class SimConfig:
 
 
 # --- Visual mode settings (used by test_map_visual.py only) ---
+# These are NOT read by experiments/runner.py or the debug tests - those
+# construct SimConfig objects directly. The VISUAL_ prefix makes the scope
+# unambiguous so nobody expects edits here to affect the full experiment.
 
-CIVILIAN_NUMBER = 100
-GUIDE_POLICY = "router"
-GUIDES_ENABLED = True
-GUIDE_COUNT = None
+VISUAL_CIVILIAN_NUMBER = 100
+VISUAL_GUIDE_POLICY = "router"
+VISUAL_GUIDES_ENABLED = True
+VISUAL_GUIDE_COUNT = None  # default one guide per exit (4)
+VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",
+# "bottom_left", "bottom_right"

@@ -1,7 +1,14 @@
 import sys
 import pygame
 from PIL import Image
-from config import SimConfig, CIVILIAN_NUMBER, GUIDES_ENABLED, GUIDE_POLICY, GUIDE_COUNT
+from config import (
+    SimConfig,
+    VISUAL_CIVILIAN_NUMBER,
+    VISUAL_GUIDES_ENABLED,
+    VISUAL_GUIDE_POLICY,
+    VISUAL_GUIDE_COUNT,
+    VISUAL_FIRE_POSITION,
+)
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
@@ -31,7 +38,7 @@ if len(sys.argv) > 1:
 else:
     map_file = "maps/bottleneck_A.txt"
 
-config = SimConfig(map_file=map_file)
+config = SimConfig(map_file=map_file, fire_position=VISUAL_FIRE_POSITION)
 env = Environment(config)
 
 
@@ -100,20 +107,20 @@ smoke_system._fire = fire_system
 # STEP 5b: SPAWN CIVILIANS
 # =====================================================================
 
-civilians = spawn_civilians(env, n=CIVILIAN_NUMBER, speed=1.5, seed=99)
+civilians = spawn_civilians(env, n=VISUAL_CIVILIAN_NUMBER, speed=1.5, seed=99)
 
 # Spawn guides based on config
 guides = []
-if GUIDES_ENABLED:
-    n = GUIDE_COUNT if GUIDE_COUNT is not None else len(env.exits)
-    if GUIDE_POLICY == "beacon":
+if VISUAL_GUIDES_ENABLED:
+    n = VISUAL_GUIDE_COUNT if VISUAL_GUIDE_COUNT is not None else len(env.exits)
+    if VISUAL_GUIDE_POLICY == "beacon":
         guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
-    elif GUIDE_POLICY == "sweeper":
+    elif VISUAL_GUIDE_POLICY == "sweeper":
         guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77,
-                                      n_civilians=CIVILIAN_NUMBER)
-    elif GUIDE_POLICY == "router":
+                                      n_civilians=VISUAL_CIVILIAN_NUMBER)
+    elif VISUAL_GUIDE_POLICY == "router":
         guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77,
-                                     n_civilians=CIVILIAN_NUMBER)
+                                     n_civilians=VISUAL_CIVILIAN_NUMBER)
 
 # The circle radius in pixels (for drawing)
 CIV_RADIUS = max(4, CELL // 4)
@@ -330,7 +337,7 @@ while running:
     escaped = sum(1 for c in civilians if c.state == ESCAPED)
     dead = sum(1 for c in civilians if c.state == DEAD)
     guides_alive = sum(1 for g in guides if g.alive)
-    policy_label = GUIDE_POLICY.upper() if GUIDES_ENABLED else "NONE"
+    policy_label = VISUAL_GUIDE_POLICY.upper() if VISUAL_GUIDES_ENABLED else "NONE"
     alive_civs = [c for c in civilians if c.state not in (ESCAPED, DEAD)]
     avg_potency = sum(c.potency for c in alive_civs) / max(1, len(alive_civs))
     in_group = sum(1 for c in civilians if c.state == FOLLOWING_GUIDE)
