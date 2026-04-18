@@ -6,7 +6,9 @@ class SimConfig:
     # Map
     map_file: str = "maps/bottleneck_A.txt"
     cell_size: float = 10.0
-    fire_position: str = "center"
+    fire_position: str = (
+        "center"  # "center", "top_right", "top_left", "bottom_right", "bottom_left"
+    )
 
     # Civilians
     n_civilians: int = 50

@@ -72,7 +72,12 @@ class Environment:
         }
 
         if position not in positions:
-            return None
+            # Fail loudly on typos rather than silently running with no
+            # fire (which would corrupt results for that condition).
+            raise ValueError(
+                f"Unknown fire_position {position!r}. "
+                f"Valid options: {sorted(positions.keys())}"
+            )
 
         target_r, target_c = positions[position]
 
