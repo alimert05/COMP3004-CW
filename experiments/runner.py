@@ -116,7 +116,7 @@ def build_configs(maps=None, fire_positions=None, policies=None,
                 guide_policy=policy,
                 n_civilians=n_civ,
                 seed=seed,
-                max_ticks=3000,
+                max_ticks=6000,
             )
             # Store trial number for CSV
             config._trial = trial
@@ -152,6 +152,8 @@ def run_and_label(config):
             "n_guides": 0, "guides_survived": 0,
             "escaped_0_500": 0, "escaped_500_1000": 0, "escaped_1000_1500": 0,
             "escaped_1500_2000": 0, "escaped_2000_2500": 0, "escaped_2500_3000": 0,
+            "escaped_3000_3500": 0, "escaped_3500_4000": 0, "escaped_4000_4500": 0,
+            "escaped_4500_5000": 0, "escaped_5000_5500": 0, "escaped_5500_6000": 0,
         }
 
 
@@ -162,9 +164,13 @@ CSV_FIELDNAMES = [
     "TV", "TM", "MP", "MT", "survival_rate", "evacuation_time",
     "still_alive", "total_civilians", "n_guides", "guides_survived",
     # Evacuation-curve bins (count of civilians who escaped in each
-    # 500-tick window, used to build cumulative escape curves)
+    # 500-tick window, used to build cumulative escape curves).
+    # Extended to 12 bins covering 0-6000 ticks after max_ticks was
+    # raised from 3000 to 6000.
     "escaped_0_500", "escaped_500_1000", "escaped_1000_1500",
     "escaped_1500_2000", "escaped_2000_2500", "escaped_2500_3000",
+    "escaped_3000_3500", "escaped_3500_4000", "escaped_4000_4500",
+    "escaped_4500_5000", "escaped_5000_5500", "escaped_5500_6000",
     # Always include the error column so a late-appearing error doesn't
     # break the streaming writer. Blank for successful runs.
     "error",

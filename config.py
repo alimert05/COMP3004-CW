@@ -24,7 +24,12 @@ class SimConfig:
     fire_spread_rate: float = 0.005
 
     # Simulation limits
-    max_ticks: int = 3000  # Stop after this many ticks (~100s at 30fps)
+    max_ticks: int = 6000  # Safety cap chosen from measure_saturation.py probe:
+                           # worst-case smoke damage coverage ~4,500 ticks,
+                           # plus civilian death time (~300 ticks at damage
+                           # threshold), plus ~1,200-tick safety buffer.
+                           # In practice, simulations terminate via `all_done`
+                           # well before this cap.
     seed: int = 42
 
     # Exit throughput (max civilians escaping per exit per tick)

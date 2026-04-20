@@ -69,7 +69,8 @@ POLICY_COLORS = {
     "sweeper": "#5B8FF9",
     "router":  "#E57373",
 }
-BIN_EDGES = [0, 500, 1000, 1500, 2000, 2500, 3000]
+BIN_EDGES = [0, 500, 1000, 1500, 2000, 2500, 3000,
+             3500, 4000, 4500, 5000, 5500, 6000]
 BIN_COLUMNS = [f"escaped_{lo}_{hi}" for lo, hi in
                zip(BIN_EDGES[:-1], BIN_EDGES[1:])]
 
@@ -477,7 +478,7 @@ def plot_evacuation_curves(df: pd.DataFrame, outpath: Path,
         title = f"Evacuation curves — {mt}" if mt else "Evacuation curves (all maps)"
         ax.set_title(title)
         ax.set_ylim(0, 105)
-        ax.set_xlim(0, 3000)
+        ax.set_xlim(0, 6000)
         ax.legend(title="Policy", loc="lower right")
         ax.grid(True, alpha=0.3)
 
