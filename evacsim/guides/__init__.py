@@ -12,7 +12,11 @@ from evacsim.guides.common import (
 )
 from evacsim.guides.base import Guide
 from evacsim.guides.beacon import BeaconGuide, spawn_beacon_guides
-from evacsim.guides.sweeper import SweeperGuide, spawn_sweeper_guides
+from evacsim.guides.sweeper import (
+    SweeperBlackboard,
+    SweeperGuide,
+    spawn_sweeper_guides,
+)
 from evacsim.guides.router import (
     RouterBlackboard,
     RouterGuide,
@@ -27,6 +31,6 @@ __all__ = [
     "build_density_grid",
     "Guide",
     "BeaconGuide", "spawn_beacon_guides",
-    "SweeperGuide", "spawn_sweeper_guides",
+    "SweeperBlackboard", "SweeperGuide", "spawn_sweeper_guides",
     "RouterBlackboard", "RouterGuide", "spawn_router_guides",
 ]

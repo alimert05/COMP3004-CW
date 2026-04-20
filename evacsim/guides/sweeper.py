@@ -9,6 +9,156 @@ from evacsim.guides.base import Guide
 from evacsim.guides.common import bfs_path, dijkstra_congestion_path
 
 
+class SweeperBlackboard:
+    """Shared coordination blackboard for Sweeper guides.
+
+    Strictly reactive: every channel stores CURRENT state read for CURRENT
+    decisions. No prediction, no multi-step planning, no congestion
+    inference. This preserves Sweeper's reactive identity (Brooks 1991)
+    while replacing the informal ``_all_sweepers`` class registry with a
+    uniform coordination mechanism that structurally mirrors Router's
+    formal blackboard.
+
+    Four channels:
+
+    1. POSITIONS (expiry 10 ticks) — each Sweeper posts its current world
+       position every tick. Parallels Router's position channel. In v1 the
+       field is passive (written but not read by the patrol FSM);
+       included for architectural symmetry and diagnostic visibility.
+
+    2. PATROL TARGETS (expiry 30 ticks) — each Sweeper posts the patrol
+       cell it is currently walking toward. Peers consult this channel
+       during ``_advance_patrol`` and skip candidate cells currently
+       claimed by another guide. Prevents duplicate visits after
+       territory reallocation, when adopted territories can overlap live
+       peer routes. TTL 30 ticks covers a typical walk-to-point; if the
+       claiming guide dies silently, the claim auto-expires.
+
+    3. CLEARED CELLS (persistent for the simulation) — each Sweeper posts
+       the world position of every patrol cell it has marked cleared.
+       Peers consult this channel in ``_advance_patrol`` and skip
+       candidate cells near positions a peer has already visited.
+       Persistence is correct because cleared cells cannot become
+       re-occupied by unassisted civilians during a single run.
+
+    4. WORKLOAD (expiry 30 ticks) — each Sweeper posts its uncleared
+       patrol-point count every tick alongside a self-reference. Replaces
+       the direct peer scan in ``_try_reallocate_to_peer``: reallocation
+       now reads the busiest peer from this channel instead of iterating
+       a class-level registry.
+
+    Lifetime: one instance per simulation, created in
+    ``spawn_sweeper_guides`` and handed to each ``SweeperGuide`` through
+    the constructor. A fresh instance per spawn call handles cross-run
+    isolation under multiprocessing without a class-level reset.
+    """
+
+    POSITION_EXPIRY = 10
+    TARGET_EXPIRY = 30
+    # Workload is republished every tick by alive guides, so the TTL only
+    # acts as silent-death cleanup — matches POSITION_EXPIRY's role.
+    WORKLOAD_EXPIRY = 10
+
+    def __init__(self):
+        self._positions = {}        # guide_id -> (np.array pos, tick)
+        self._patrol_targets = {}   # guide_id -> (np.array pos, tick)
+        self._cleared_cells = []    # list of np.array world positions
+        self._workload = {}         # guide_id -> (count, guide_ref, tick)
+
+    # -- Positions (diagnostic / symmetry channel) --
+
+    def update_position(self, guide_id, position, tick):
+        """Record the current position of a Sweeper. Called every tick."""
+        self._positions[guide_id] = (np.array(position, dtype=float), tick)
+
+    def get_other_positions(self, exclude_guide, current_tick):
+        """Return fresh positions of OTHER Sweepers. Lazy-cleans stale entries
+        so dead or departed guides do not keep "holding" territory."""
+        result = []
+        for gid, (pos, tick) in list(self._positions.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.POSITION_EXPIRY:
+                del self._positions[gid]
+                continue
+            result.append(pos)
+        return result
+
+    # -- Patrol targets (active gating channel) --
+
+    def claim_patrol_target(self, guide_id, position, tick):
+        """Publish the cell this Sweeper is walking toward."""
+        self._patrol_targets[guide_id] = (
+            np.array(position, dtype=float), tick,
+        )
+
+    def is_target_claimed(self, position, current_tick,
+                          exclude_guide=None, radius=20.0):
+        """True if any OTHER guide has a fresh claim within ``radius`` world
+        units. Lazy-cleans stale entries on the fly."""
+        target = np.array(position, dtype=float)
+        for gid, (pos, tick) in list(self._patrol_targets.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.TARGET_EXPIRY:
+                del self._patrol_targets[gid]
+                continue
+            if np.linalg.norm(pos - target) < radius:
+                return True
+        return False
+
+    # -- Cleared cells (persistent coverage channel) --
+
+    def post_cleared(self, position):
+        """Post a cell as cleared. Persistent for the simulation (no TTL):
+        once a patrol point is confirmed empty, unassisted civilians do
+        not re-occupy it within one run."""
+        self._cleared_cells.append(np.array(position, dtype=float))
+
+    def is_cleared(self, position, radius=20.0):
+        """True if any peer has marked a cell within ``radius`` world units
+        cleared."""
+        target = np.array(position, dtype=float)
+        for pos in self._cleared_cells:
+            if np.linalg.norm(pos - target) < radius:
+                return True
+        return False
+
+    # -- Workload (reallocation signal) --
+
+    def update_workload(self, guide_id, count, guide, tick):
+        """Publish uncleared patrol count and a self-reference so peers can
+        identify the busiest guide without iterating a class registry."""
+        self._workload[guide_id] = (int(count), guide, tick)
+
+    def get_busiest_peer(self, exclude_guide, current_tick, min_count=3):
+        """Return the peer guide with the highest uncleared count, provided
+        it meets ``min_count``. Filters dead and stale entries."""
+        best = None
+        best_count = 0
+        for gid, (count, guide, tick) in list(self._workload.items()):
+            if gid == exclude_guide:
+                continue
+            if current_tick - tick > self.WORKLOAD_EXPIRY:
+                del self._workload[gid]
+                continue
+            if not getattr(guide, "alive", False):
+                continue
+            if count > best_count:
+                best_count = count
+                best = guide
+        if best is None or best_count < min_count:
+            return None
+        return best
+
+    def reset(self):
+        """Clear all blackboard state (new simulation)."""
+        self._positions.clear()
+        self._patrol_targets.clear()
+        self._cleared_cells.clear()
+        self._workload.clear()
+
+
 def _find_patrol_points(env: Environment):
     """Find patrol points using hybrid room detection + grid scan.
 
@@ -129,10 +279,6 @@ class SweeperGuide(Guide):
     Spawns from exits (like real firefighters entering the building).
     """
 
-    # Class-level registry of all active Sweepers (populated by spawn function).
-    # Used for territory reallocation between peer Sweepers.
-    _all_sweepers: list = []
-
     COLLECTING = "collecting"
     ESCORTING = "escorting"
     RELEASING = "releasing"  # Waiting at exit for group to arrive and escape
@@ -148,8 +294,15 @@ class SweeperGuide(Guide):
         patrol_points: list = None,
         n_civilians: int = 100,
         n_guides: int = 4,
+        blackboard: "SweeperBlackboard" = None,
     ):
         super().__init__(x, y, speed, env, rng)
+
+        # Shared coordination blackboard (reactive channels only). A fresh
+        # per-guide instance is used when no shared board is provided so
+        # stand-alone construction (e.g. in unit tests) still works.
+        self._blackboard = blackboard or SweeperBlackboard()
+        self._guide_id = id(self)
 
         self._group = []
 
@@ -191,6 +344,10 @@ class SweeperGuide(Guide):
         # Start patrol
         if self._patrol_route:
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
+            # Publish the initial target claim so peers see it from tick 0.
+            self._blackboard.claim_patrol_target(
+                self._guide_id, self._patrol_route[0], self._tick,
+            )
 
     def _effective_max_group(self) -> int:
         """Dynamic commitment ceiling via T-S fuzzy inference (reactive).
@@ -256,6 +413,23 @@ class SweeperGuide(Guide):
             self._release_group_no_exit()
             return
 
+        # Publish current position to the shared blackboard (diagnostic /
+        # symmetry channel; not read by the patrol FSM in v1).
+        self._blackboard.update_position(self._guide_id, self.pos, self._tick)
+
+        # Publish workload (uncleared patrol count) so peers can identify
+        # the busiest Sweeper without iterating a class-level registry.
+        if self._patrol_route:
+            uncleared = sum(
+                1 for i in range(len(self._patrol_route))
+                if i not in self._cleared_points
+            )
+        else:
+            uncleared = 0
+        self._blackboard.update_workload(
+            self._guide_id, uncleared, self, self._tick,
+        )
+
         self._clean_group()
 
         # Always recruit nearby civilians while moving
@@ -317,8 +491,13 @@ class SweeperGuide(Guide):
                 self._waiting = False
                 recruitable = self._count_recruitable(env, smoke, civilians)
                 if recruitable == 0:
-                    # Nobody here — mark this point as cleared
+                    # Nobody here — mark this point as cleared both locally
+                    # and on the shared blackboard so peers can skip it.
                     self._cleared_points.add(self._patrol_idx)
+                    if 0 <= self._patrol_idx < len(self._patrol_route):
+                        self._blackboard.post_cleared(
+                            self._patrol_route[self._patrol_idx]
+                        )
                 if self._group and recruitable == 0:
                     # Nobody else here. Escort or keep collecting?
                     # Only escort if group has decent size (5+).
@@ -657,22 +836,28 @@ class SweeperGuide(Guide):
         """Territory reallocation: when this guide's own territory is fully
         cleared, adopt uncleared patrol points from a peer Sweeper that still
         has work. Mirrors fire brigade radio coordination. Returns True if
-        reallocation succeeded (patrol_route and waypoints updated)."""
-        best_peer = None
-        best_uncleared = 0
-        for peer in SweeperGuide._all_sweepers:
-            if peer is self or not peer.alive:
-                continue
-            uncleared = sum(
-                1 for i in range(len(peer._patrol_route))
-                if i not in peer._cleared_points
-            )
-            if uncleared > best_uncleared:
-                best_uncleared = uncleared
-                best_peer = peer
+        reallocation succeeded (patrol_route and waypoints updated).
 
-        # Only reallocate if peer has enough work to share (avoid ping-pong)
-        if best_peer is None or best_uncleared < 3:
+        Peer selection goes through the shared blackboard's workload
+        channel (replacing the old ``_all_sweepers`` class registry).
+        The blackboard returns the busiest peer meeting ``min_count``; a
+        defensive re-check below guards against stale workload signals."""
+        best_peer = self._blackboard.get_busiest_peer(
+            exclude_guide=self._guide_id,
+            current_tick=self._tick,
+            min_count=3,
+        )
+        if best_peer is None:
+            return False
+
+        # Defensive re-check against the peer's live state: the workload
+        # signal may be up to WORKLOAD_EXPIRY ticks stale, so the peer's
+        # current uncleared count could be lower than reported.
+        peer_live_uncleared = sum(
+            1 for i in range(len(best_peer._patrol_route))
+            if i not in best_peer._cleared_points
+        )
+        if peer_live_uncleared < 3:
             return False
 
         # Take half of peer's uncleared points (both guides keep working)
@@ -748,6 +933,12 @@ class SweeperGuide(Guide):
             self._waypoints = bfs_path(
                 env, self.pos, self._patrol_route[0], fire_grid=danger
             )
+
+        # Publish the adopted territory's first target so other peers
+        # treat it as claimed by this guide going forward.
+        self._blackboard.claim_patrol_target(
+            self._guide_id, self._patrol_route[0], self._tick,
+        )
         return True
 
     def _advance_patrol(self, env):
@@ -758,6 +949,14 @@ class SweeperGuide(Guide):
         fg = getattr(self, "_fire_grid", None)
         sg = getattr(self, "_smoke_grid", None)
 
+        # Track whether this call has wrapped to cycle-complete without a
+        # successful reallocation. When that happens, peer-gating must be
+        # relaxed so the guide can re-walk its own territory instead of
+        # stalling — the persistent CLEARED CELLS channel would otherwise
+        # block every candidate. IDLE civilians who wander into previously
+        # empty cells are the main reason re-walk has residual value.
+        cycle_restarted = False
+
         # Try up to len(route) points to find a valid one
         for _ in range(len(self._patrol_route)):
             self._patrol_idx = (self._patrol_idx + 1) % len(self._patrol_route)
@@ -765,17 +964,42 @@ class SweeperGuide(Guide):
             # Full cycle completed? Try territory reallocation before reset.
             # If we can adopt a peer's uncleared points, do that instead of
             # re-walking our own (already empty) territory.
-            if self._patrol_idx == self._cycle_start_idx:
+            if (
+                self._patrol_idx == self._cycle_start_idx
+                and not cycle_restarted
+            ):
                 if self._try_reallocate_to_peer(env):
                     return  # Waypoints already set by reallocation
                 self._cleared_points.clear()
                 self._cycle_start_idx = self._patrol_idx
+                cycle_restarted = True
 
             # Skip cleared points (visited, nobody there)
             if self._patrol_idx in self._cleared_points:
                 continue
 
             target = self._patrol_route[self._patrol_idx]
+
+            # Peer-gating applies to the first-pass coverage assignment,
+            # not to the post-exhaustion re-walk. Skipping the two
+            # blackboard checks on a restarted cycle restores the
+            # pre-blackboard fallback behaviour — walk own territory,
+            # picking up any civilian who has drifted in.
+            if not cycle_restarted:
+                # Blackboard: skip cells another peer is currently walking
+                # toward. TTL 30 ticks (TARGET_EXPIRY) auto-recovers from
+                # silent peer death.
+                if self._blackboard.is_target_claimed(
+                    target, self._tick, exclude_guide=self._guide_id,
+                ):
+                    continue
+
+                # Blackboard: skip cells a peer has already visited and
+                # confirmed empty. Persistent channel: once cleared,
+                # unassisted civilians do not re-occupy a cell in one run.
+                if self._blackboard.is_cleared(target):
+                    continue
+
             tr, tc = env.world_to_grid(target[0], target[1])
 
             # Skip patrol points that are now in fire or heavy smoke
@@ -789,6 +1013,15 @@ class SweeperGuide(Guide):
 
             if not is_dangerous:
                 break  # Found a safe patrol point
+
+        # Publish the new patrol target so peers skip it. Claimed even
+        # when the loop exhausted and landed on a degraded candidate:
+        # stale claims auto-expire after TARGET_EXPIRY ticks.
+        self._blackboard.claim_patrol_target(
+            self._guide_id,
+            self._patrol_route[self._patrol_idx],
+            self._tick,
+        )
 
         # Compute path — avoid smoke if carrying group, light smoke avoidance solo.
         # Fire ×3 so 0.3 threshold matches 0.1 fire-damage onset.
@@ -892,9 +1125,10 @@ def spawn_sweeper_guides(
                 else:
                     territories[3 % n_guides].append(p)
 
-    # Reset the class-level registry for this new simulation (prevents
-    # pollution between experimental runs).
-    SweeperGuide._all_sweepers = []
+    # Shared coordination blackboard for all Sweepers in this simulation.
+    # A fresh instance per spawn call handles cross-run isolation under
+    # multiprocessing (no class-level reset needed).
+    blackboard = SweeperBlackboard()
 
     guides = []
     for i in range(n_guides):
@@ -904,8 +1138,8 @@ def spawn_sweeper_guides(
         # Order: farthest points first (so guide goes deep into building first)
         pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
         guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted,
-                             n_civilians=n_civilians, n_guides=n_guides)
+                             n_civilians=n_civilians, n_guides=n_guides,
+                             blackboard=blackboard)
         guides.append(guide)
-        SweeperGuide._all_sweepers.append(guide)
 
     return guides

@@ -16,6 +16,7 @@ from evacsim.guides import (  # explicit re-exports for static analysis
     Guide,
     BeaconGuide,
     spawn_beacon_guides,
+    SweeperBlackboard,
     SweeperGuide,
     spawn_sweeper_guides,
     RouterBlackboard,
@@ -31,6 +32,6 @@ __all__ = [
     "build_density_grid",
     "Guide",
     "BeaconGuide", "spawn_beacon_guides",
-    "SweeperGuide", "spawn_sweeper_guides",
+    "SweeperBlackboard", "SweeperGuide", "spawn_sweeper_guides",
     "RouterBlackboard", "RouterGuide", "spawn_router_guides",
 ]

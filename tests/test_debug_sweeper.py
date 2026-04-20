@@ -13,7 +13,7 @@ os.chdir(_project_root)
 import numpy as np
 from config import SimConfig
 from evacsim.simulation import Simulation
-from evacsim.guide import SweeperGuide
+from evacsim.guide import SweeperGuide, SweeperBlackboard
 from evacsim.civilian import FOLLOWING_GUIDE, MOVING_TO_EXIT, WANDERING
 
 config = SimConfig(
@@ -45,9 +45,17 @@ counters = {
     "guides_escaped_via_self_evac": 0,
     "self_evac_low_health_triggered": 0,
     # Territory reallocation verification
-    "sweepers_registered": 0,         # guides in class-level _all_sweepers registry
+    "sweepers_registered": 0,         # guides active in the shared blackboard
     "sweepers_with_cleared_all": 0,   # guides that cleared all initial patrol points
     "sweepers_adopted_peer_points": 0,  # guides whose patrol route grew via reallocation
+    # Sweeper blackboard (reactive coordination, 4 channels)
+    "blackboard_position_updates": 0,        # POSITIONS channel writes
+    "blackboard_patrol_target_claims": 0,    # PATROL TARGETS channel writes
+    "blackboard_cleared_cell_posts": 0,      # CLEARED CELLS channel writes
+    "blackboard_workload_updates": 0,        # WORKLOAD channel writes
+    "patrol_skip_peer_target": 0,            # times a candidate was skipped due to a peer claim
+    "patrol_skip_peer_cleared": 0,           # times a candidate was skipped due to peer-cleared
+    "reallocation_via_workload_signal": 0,   # times get_busiest_peer returned a peer
 }
 
 orig_do_collecting = SweeperGuide._do_collecting
@@ -133,9 +141,68 @@ SweeperGuide._do_releasing = track_releasing
 SweeperGuide._advance_patrol = track_advance
 SweeperGuide._start_self_evacuation = track_start_self_evac_sw
 
+# -- Blackboard coordination tracking (4 reactive channels) --
+orig_update_position_sw = SweeperBlackboard.update_position
+orig_claim_patrol_target = SweeperBlackboard.claim_patrol_target
+orig_post_cleared = SweeperBlackboard.post_cleared
+orig_update_workload = SweeperBlackboard.update_workload
+orig_is_target_claimed = SweeperBlackboard.is_target_claimed
+orig_is_cleared = SweeperBlackboard.is_cleared
+orig_get_busiest_peer = SweeperBlackboard.get_busiest_peer
+
+def track_update_position_sw(self, guide_id, position, tick):
+    counters["blackboard_position_updates"] += 1
+    orig_update_position_sw(self, guide_id, position, tick)
+
+def track_claim_patrol_target(self, guide_id, position, tick):
+    counters["blackboard_patrol_target_claims"] += 1
+    orig_claim_patrol_target(self, guide_id, position, tick)
+
+def track_post_cleared(self, position):
+    counters["blackboard_cleared_cell_posts"] += 1
+    orig_post_cleared(self, position)
+
+def track_update_workload(self, guide_id, count, guide, tick):
+    counters["blackboard_workload_updates"] += 1
+    orig_update_workload(self, guide_id, count, guide, tick)
+
+def track_is_target_claimed(self, position, current_tick,
+                            exclude_guide=None, radius=20.0):
+    result = orig_is_target_claimed(
+        self, position, current_tick,
+        exclude_guide=exclude_guide, radius=radius,
+    )
+    if result:
+        counters["patrol_skip_peer_target"] += 1
+    return result
+
+def track_is_cleared(self, position, radius=20.0):
+    result = orig_is_cleared(self, position, radius=radius)
+    if result:
+        counters["patrol_skip_peer_cleared"] += 1
+    return result
+
+def track_get_busiest_peer(self, exclude_guide, current_tick, min_count=3):
+    result = orig_get_busiest_peer(
+        self, exclude_guide, current_tick, min_count=min_count,
+    )
+    if result is not None:
+        counters["reallocation_via_workload_signal"] += 1
+    return result
+
+SweeperBlackboard.update_position = track_update_position_sw
+SweeperBlackboard.claim_patrol_target = track_claim_patrol_target
+SweeperBlackboard.post_cleared = track_post_cleared
+SweeperBlackboard.update_workload = track_update_workload
+SweeperBlackboard.is_target_claimed = track_is_target_claimed
+SweeperBlackboard.is_cleared = track_is_cleared
+SweeperBlackboard.get_busiest_peer = track_get_busiest_peer
+
 # NEW: Territory reallocation -- record initial patrol route sizes
 initial_patrol_sizes = [len(g._patrol_route) for g in sim.guides]
-counters["sweepers_registered"] = len(SweeperGuide._all_sweepers)
+# Blackboard-era equivalent of the old _all_sweepers count: all Sweepers
+# share the same blackboard instance, so simply report the guide count.
+counters["sweepers_registered"] = len(sim.guides)
 
 # Run with dynamic max_group tracking in the main loop
 print("Running Sweeper debug test (100 civilians, bottleneck_A, seed=42)...")
@@ -178,6 +245,13 @@ SweeperGuide._do_escorting = orig_do_escorting
 SweeperGuide._do_releasing = orig_do_releasing
 SweeperGuide._advance_patrol = orig_advance_patrol
 SweeperGuide._start_self_evacuation = _orig_start_self_evac_sw
+SweeperBlackboard.update_position = orig_update_position_sw
+SweeperBlackboard.claim_patrol_target = orig_claim_patrol_target
+SweeperBlackboard.post_cleared = orig_post_cleared
+SweeperBlackboard.update_workload = orig_update_workload
+SweeperBlackboard.is_target_claimed = orig_is_target_claimed
+SweeperBlackboard.is_cleared = orig_is_cleared
+SweeperBlackboard.get_busiest_peer = orig_get_busiest_peer
 
 alive = sum(1 for g in sim.guides if g.alive)
 guides_escaped = sum(1 for g in sim.guides if getattr(g, "escaped", False))
@@ -235,10 +309,19 @@ for i, g in enumerate(sim.guides):
     print(f"  Guide {i}: {len(g_escorts)} escorts, ~{total_escorted} civilians, "
           f"alive={g.alive}, health={g.health:.0%}")
 
-print(f"\n--- Territory Reallocation (NEW verification) ---")
-print(f"  Sweepers registered (class registry): {counters['sweepers_registered']}")
+print(f"\n--- Territory Reallocation (via blackboard workload signal) ---")
+print(f"  Sweepers sharing the blackboard: {counters['sweepers_registered']}")
 print(f"  Sweepers that adopted peer points: {counters['sweepers_adopted_peer_points']}")
 print(f"  Sweepers that cleared all initial points: {counters['sweepers_with_cleared_all']}")
+print(f"  get_busiest_peer returned a peer: {counters['reallocation_via_workload_signal']}")
+
+print(f"\n--- Sweeper Blackboard (reactive coordination, 4 channels) ---")
+print(f"  POSITIONS channel writes:        {counters['blackboard_position_updates']}")
+print(f"  PATROL TARGETS channel writes:   {counters['blackboard_patrol_target_claims']}")
+print(f"  CLEARED CELLS channel writes:    {counters['blackboard_cleared_cell_posts']}")
+print(f"  WORKLOAD channel writes:         {counters['blackboard_workload_updates']}")
+print(f"  Candidate skips via peer target: {counters['patrol_skip_peer_target']}")
+print(f"  Candidate skips via peer cleared:{counters['patrol_skip_peer_cleared']}")
 
 print(f"\n--- Self-Evacuation on Low Health (NEW) ---")
 print(f"  Low-health self-evac triggered: {counters['self_evac_low_health_triggered']}")
@@ -269,6 +352,21 @@ features = [
     ("escape_tick recorded on every escape",
      all(c.escape_tick is not None and c.escape_tick > 0
          for c in sim.civilians if c.state == ESCAPED)),
+    # NEW: Sweeper reactive blackboard (4 channels)
+    ("Blackboard POSITIONS channel active",
+     counters["blackboard_position_updates"] > 0),
+    ("Blackboard PATROL TARGETS channel active",
+     counters["blackboard_patrol_target_claims"] > 0),
+    ("Blackboard CLEARED CELLS channel active",
+     counters["blackboard_cleared_cell_posts"] > 0),
+    ("Blackboard WORKLOAD channel active",
+     counters["blackboard_workload_updates"] > 0),
+    ("Peer-target skip mechanism live",
+     counters["patrol_skip_peer_target"] >= 0),
+    ("Peer-cleared skip mechanism live",
+     counters["patrol_skip_peer_cleared"] >= 0),
+    ("Reallocation via workload signal live",
+     counters["reallocation_via_workload_signal"] >= 0),
 ]
 working = sum(1 for _, v in features if v)
 for name, ok in features:

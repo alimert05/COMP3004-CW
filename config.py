@@ -25,11 +25,11 @@ class SimConfig:
 
     # Simulation limits
     max_ticks: int = 6000  # Safety cap chosen from measure_saturation.py probe:
-                           # worst-case smoke damage coverage ~4,500 ticks,
-                           # plus civilian death time (~300 ticks at damage
-                           # threshold), plus ~1,200-tick safety buffer.
-                           # In practice, simulations terminate via `all_done`
-                           # well before this cap.
+    # worst-case smoke damage coverage ~4,500 ticks,
+    # plus civilian death time (~300 ticks at damage
+    # threshold), plus ~1,200-tick safety buffer.
+    # In practice, simulations terminate via `all_done`
+    # well before this cap.
     seed: int = 42
 
     # Exit throughput (max civilians escaping per exit per tick)
@@ -42,7 +42,7 @@ class SimConfig:
 # unambiguous so nobody expects edits here to affect the full experiment.
 
 VISUAL_CIVILIAN_NUMBER = 100
-VISUAL_GUIDE_POLICY = "router"
+VISUAL_GUIDE_POLICY = "sweeper"
 VISUAL_GUIDES_ENABLED = True
 VISUAL_GUIDE_COUNT = None  # default one guide per exit (4)
 VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",
