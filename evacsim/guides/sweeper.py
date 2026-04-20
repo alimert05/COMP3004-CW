@@ -151,6 +151,23 @@ class SweeperBlackboard:
             return None
         return best
 
+    def release(self, guide_id):
+        """Remove this guide's live-state entries from every channel.
+
+        Called when a Sweeper dies or self-evacuates, mirroring
+        ``RouterBlackboard.release``. All channels store current state
+        per guide except ``_cleared_cells``, which is a persistent
+        coverage log contributed to across the simulation; those entries
+        stay (a dead guide's earlier coverage knowledge is still true).
+
+        Reads in every channel already filter stale or dead entries
+        (``alive`` check + TTL), so this method is structural tidiness —
+        it wipes the dict immediately instead of waiting 10 ticks.
+        """
+        self._positions.pop(guide_id, None)
+        self._patrol_targets.pop(guide_id, None)
+        self._workload.pop(guide_id, None)
+
     def reset(self):
         """Clear all blackboard state (new simulation)."""
         self._positions.clear()
@@ -817,7 +834,13 @@ class SweeperGuide(Guide):
     # Guide now waits at exit and releases civilians one by one as they arrive
 
     def _release_group_no_exit(self):
-        """Release group without exit info (guide died/evacuating)."""
+        """Release group without exit info (guide died/evacuating).
+
+        Also releases this guide's live-state entries from the shared
+        blackboard so peers see immediate cleanup rather than waiting for
+        TTL-based expiry. Mirrors Router's ``release_group_wandering``
+        pattern for structural symmetry between the two blackboards.
+        """
         from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
 
         for civ in self._group:
@@ -825,6 +848,7 @@ class SweeperGuide(Guide):
                 civ.assigned_guide = None
                 civ.state = WANDERING
         self._group.clear()
+        self._blackboard.release(self._guide_id)
 
     def _clean_group(self):
         """Remove dead/escaped civilians from group."""
