@@ -185,7 +185,9 @@ def run_experiment(configs, output_file="results/experiment_results.csv",
     crashes (power cut, OOM, Ctrl-C) at any point, everything completed so
     far is already on disk. No 7-hour data loss risk.
     """
-    n_workers = n_workers or max(1, cpu_count() - 1)
+    # Default 8 workers: chosen for the target machine (8 logical cores).
+    # Override via --workers on machines with different core counts.
+    n_workers = n_workers or 8
     total = len(configs)
 
     print(f"Running {total} simulations on {n_workers} workers...")
