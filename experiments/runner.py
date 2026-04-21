@@ -75,9 +75,19 @@ CROWD_SIZES = [50, 100, 150]
 N_TRIALS = 30
 
 
-def _deterministic_seed(map_file: str, fire_pos: str, policy: str,
-                        n_civ: int, trial: int) -> int:
-    """Generate a deterministic seed from the condition key.
+def _deterministic_seed(trial: int) -> int:
+    """Generate a deterministic seed from the trial number.
+
+    Fully paired / randomised-block design: only `trial` determines the
+    seed, so every combination of (map, fire, crowd, policy) shares the
+    same 30 random seeds. Trial N represents the same "civilian cohort"
+    everywhere — same potency rolls, same reaction delays, same
+    fire/smoke CA noise sequence, same RNG draw pattern for spawn
+    positions. This makes every comparison in the factorial design
+    matched on stochastic noise: within-cell (policy vs policy) AND
+    across-cell (map vs map, crowd vs crowd, fire vs fire). The policy,
+    topology, crowd, and fire factors isolate their own effects without
+    interference from random cohort variation.
 
     Python's built-in hash() is randomised per-process (PEP 456, on by
     default since Python 3.3), so re-running the experiment in a fresh
@@ -86,7 +96,7 @@ def _deterministic_seed(map_file: str, fire_pos: str, policy: str,
     sessions, and Python versions, giving us stable seeds for any future
     re-run or replication.
     """
-    key = f"{map_file}|{fire_pos}|{policy}|{n_civ}|{trial}".encode("utf-8")
+    key = f"{trial}".encode("utf-8")
     return zlib.crc32(key) % (2**31)
 
 
@@ -109,7 +119,7 @@ def build_configs(maps=None, fire_positions=None, policies=None,
             else os.path.join(PROJECT_ROOT, map_file)
         )
         for trial in range(n_trials):
-            seed = _deterministic_seed(map_file, fire_pos, policy, n_civ, trial)
+            seed = _deterministic_seed(trial)
             config = SimConfig(
                 map_file=resolved_map,
                 fire_position=fire_pos,

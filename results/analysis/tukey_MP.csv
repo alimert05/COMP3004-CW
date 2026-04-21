@@ -1,0 +1,7 @@
+group1,group2,meandiff,p_adj,lower_ci,upper_ci,reject_H0,cohens_d,d_magnitude
+beacon,none,-1.7744,0.0,-2.2341,-1.3146,True,0.18384386573659844,negligible
+beacon,router,-0.8216,0.0,-1.2814,-0.3619,True,0.17410791027639666,negligible
+beacon,sweeper,-0.807,0.0,-1.2668,-0.3473,True,0.18409582170363512,negligible
+none,router,0.9528,0.0,0.493,1.4125,True,-0.09721695105048496,negligible
+none,sweeper,0.9674,0.0,0.5076,1.4271,True,-0.10031464799421633,negligible
+router,sweeper,0.0146,0.9998,-0.4451,0.4744,False,-0.003106689015276679,negligible

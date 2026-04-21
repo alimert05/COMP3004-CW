@@ -1,0 +1,67 @@
+======================================================================
+ONE-WAY ANOVA RESULTS
+======================================================================
+
+Metric: survival_rate
+  F = 2457.5856
+  p = 0
+  eta² = 0.3387 (large)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=3600   mean=0.3875  SD=0.3065
+    beacon    n=3600   mean=0.6334  SD=0.2848
+    sweeper   n=3600   mean=0.7844  SD=0.1732
+    router    n=3600   mean=0.8285  SD=0.1643
+
+Metric: MP
+  F = 32.8909
+  p = 3.53609e-21
+  eta² = 0.0068 (negligible)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=3600   mean=71.6792  SD=12.9202
+    beacon    n=3600   mean=73.4536  SD=4.4017
+    sweeper   n=3600   mean=72.6466  SD=4.3655
+    router    n=3600   mean=72.6320  SD=5.0163
+
+Metric: MT
+  F = 470.4290
+  p = 1.27766e-291
+  eta² = 0.0893 (medium)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=3600   mean=492.7454  SD=490.7052
+    beacon    n=3600   mean=252.5480  SD=174.2661
+    sweeper   n=3600   mean=390.7309  SD=111.9452
+    router    n=3600   mean=381.6707  SD=113.7735
+
+Metric: guides_survived
+  F = inf
+  p = 0
+  eta² = 1.0000 (large)
+  Significant at p<0.05: True
+  Group stats:
+    none      n=3600   mean=0.0000  SD=0.0000
+    beacon    n=3600   mean=4.0000  SD=0.0000
+    sweeper   n=3600   mean=4.0000  SD=0.0000
+    router    n=3600   mean=4.0000  SD=0.0000
+
+
+======================================================================
+TWO-WAY ANOVA RESULTS
+======================================================================
+
+── survival_rate ~ policy × map_type ──
+                           sum_sq       df            F         PR(>F)
+C(policy)              427.694799      3.0  3930.426622   0.000000e+00
+C(map_type)            285.190021      1.0  7862.511658   0.000000e+00
+C(policy):C(map_type)   27.895788      3.0   256.356517  4.386047e-162
+Residual               522.028450  14392.0          NaN            NaN
+
+── survival_rate ~ policy × n_civilians ──
+                              sum_sq       df            F        PR(>F)
+C(policy)                 427.694799      3.0  2496.208618  0.000000e+00
+C(n_civilians)              4.688695      2.0    41.047821  1.674264e-18
+C(policy):C(n_civilians)    8.689655      6.0    25.358260  3.967525e-30
+Residual                  821.735909  14388.0          NaN           NaN
+

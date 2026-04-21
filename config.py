@@ -42,7 +42,7 @@ class SimConfig:
 # unambiguous so nobody expects edits here to affect the full experiment.
 
 VISUAL_CIVILIAN_NUMBER = 100
-VISUAL_GUIDE_POLICY = "sweeper"
+VISUAL_GUIDE_POLICY = "router"
 VISUAL_GUIDES_ENABLED = True
 VISUAL_GUIDE_COUNT = None  # default one guide per exit (4)
 VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",
