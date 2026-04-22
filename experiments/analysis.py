@@ -296,6 +296,79 @@ def tukey_posthoc(df: pd.DataFrame, metric: str,
         return pd.DataFrame({"error": [str(e)]})
 
 
+def per_map_paired_comparison(df: pd.DataFrame,
+                              policy_a: str, policy_b: str,
+                              metric: str = "survival_rate") -> pd.DataFrame:
+    """Paired t-test comparing policy_a vs policy_b on each map.
+
+    Uses the fully-paired experimental design: within each map, the same
+    (fire_position, n_civilians, trial) cell supplies one value for
+    policy_a and one for policy_b. Cohen's dz is the paired effect size
+    (mean_diff / SD_diff). Returns one row per map with mean_diff, 95%
+    CI, t-statistic, p-value, dz, and magnitude label.
+    """
+    keys = ["fire_position", "n_civilians", "trial"]
+    rows = []
+    for map_name in sorted(df["map_name"].unique()):
+        sub = df[df["map_name"] == map_name]
+        a = sub[sub["policy"] == policy_a].set_index(keys)[metric].sort_index()
+        b = sub[sub["policy"] == policy_b].set_index(keys)[metric].sort_index()
+        # Align indices (paired design guarantees identical keys)
+        common = a.index.intersection(b.index)
+        a, b = a.loc[common], b.loc[common]
+        n = len(a)
+        if n < 2:
+            continue
+        diff = a.values - b.values
+        sd_diff = diff.std(ddof=1)
+        if sd_diff == 0:
+            continue
+        t_stat, p_val = stats.ttest_rel(a.values, b.values)
+        dz = diff.mean() / sd_diff
+        ci_half = 1.96 * sd_diff / np.sqrt(n)
+        rows.append({
+            "map": map_name,
+            "n_pairs": n,
+            "mean_diff": round(diff.mean(), 4),
+            "ci_low": round(diff.mean() - ci_half, 4),
+            "ci_high": round(diff.mean() + ci_half, 4),
+            "t": round(t_stat, 3),
+            "p": p_val,
+            "cohens_dz": round(dz, 3),
+            "magnitude": _interpret_d(dz),
+        })
+    return pd.DataFrame(rows)
+
+
+def two_way_anova_with_partial_eta(df: pd.DataFrame, metric: str,
+                                    factor1: str, factor2: str) -> pd.DataFrame:
+    """Two-way ANOVA with partial η² added for each effect.
+
+    partial η² = SS_effect / (SS_effect + SS_residual) — the proportion
+    of variance explained by an effect after accounting for the other
+    terms in the model. Reported alongside F and p for every main effect
+    and the interaction term.
+    """
+    if not HAS_STATSMODELS:
+        return pd.DataFrame({"error": ["statsmodels not installed"]})
+    try:
+        formula = (f"{metric} ~ C({factor1}) + C({factor2}) "
+                   f"+ C({factor1}):C({factor2})")
+        model = ols(formula, data=df).fit()
+        table = sm.stats.anova_lm(model, typ=2).copy()
+        ss_residual = table.loc["Residual", "sum_sq"]
+        table["partial_eta2"] = table["sum_sq"] / (
+            table["sum_sq"] + ss_residual
+        )
+        table.at["Residual", "partial_eta2"] = float("nan")
+        table["magnitude"] = table["partial_eta2"].apply(
+            lambda x: _interpret_eta2(x) if not pd.isna(x) else "n/a"
+        )
+        return table
+    except Exception as e:
+        return pd.DataFrame({"error": [str(e)]})
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 4. VISUALIZATIONS
 # ═══════════════════════════════════════════════════════════════════
@@ -686,6 +759,40 @@ def main():
             fn = out_dir / f"tukey_{metric}.csv"
             tukey[metric].to_csv(fn, index=False)
             print(f"  Saved tukey_{metric}.csv")
+
+    # Extended statistics: per-map paired comparison + partial η²
+    print("\nRunning extended statistics...")
+
+    # Per-map Router-vs-Sweeper paired comparison (directly answers RQ3
+    # about topology-dependent magnitude of Router's advantage).
+    per_map_rs = per_map_paired_comparison(
+        df, "router", "sweeper", metric="survival_rate"
+    )
+    if not per_map_rs.empty and "error" not in per_map_rs.columns:
+        per_map_rs.to_csv(
+            out_dir / "per_map_router_vs_sweeper_paired.csv", index=False
+        )
+        print("  Saved per_map_router_vs_sweeper_paired.csv")
+    else:
+        print("  (per-map paired comparison produced no rows)")
+
+    # Partial η² for the two two-way ANOVAs — completes the interaction
+    # effect-size reporting (main effects already captured in η²).
+    anova_parts = []
+    for f1, f2 in [("policy", "map_type"), ("policy", "n_civilians")]:
+        table = two_way_anova_with_partial_eta(df, "survival_rate", f1, f2)
+        if not isinstance(table, pd.DataFrame) or "error" in table.columns:
+            continue
+        table_out = table.reset_index().rename(columns={"index": "term"})
+        table_out.insert(0, "model", f"survival_rate ~ {f1} x {f2}")
+        anova_parts.append(table_out)
+
+    if anova_parts:
+        combined = pd.concat(anova_parts, ignore_index=True)
+        combined.to_csv(out_dir / "anova_partial_eta2.csv", index=False)
+        print("  Saved anova_partial_eta2.csv")
+    else:
+        print("  (partial η² computation unavailable — statsmodels missing?)")
 
     # 4. Visualizations
     print("\nGenerating figures...")

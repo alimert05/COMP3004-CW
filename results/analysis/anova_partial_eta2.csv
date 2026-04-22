@@ -1,0 +1,9 @@
+model,term,sum_sq,df,F,PR(>F),partial_eta2,magnitude
+survival_rate ~ policy x map_type,C(policy),427.69479944774343,3.0,3930.4266217960508,0.0,0.45033624228930624,large
+survival_rate ~ policy x map_type,C(map_type),285.1900205048968,1.0,7862.5116576847495,0.0,0.35329967148345537,large
+survival_rate ~ policy x map_type,C(policy):C(map_type),27.895788354738798,3.0,256.35651714032576,4.386047472956137e-162,0.05072660268542176,small
+survival_rate ~ policy x map_type,Residual,522.0284501702222,14392.0,,,,n/a
+survival_rate ~ policy x n_civilians,C(policy),427.6947994477393,3.0,2496.208617523629,0.0,0.34231173961823924,large
+survival_rate ~ policy x n_civilians,C(n_civilians),4.688694526466402,2.0,41.04782088891671,1.6742635466097602e-18,0.005673469188469506,negligible
+survival_rate ~ policy x n_civilians,C(policy):C(n_civilians),8.689655192144546,6.0,25.358260378602807,3.967525181308328e-30,0.010464098847126744,small
+survival_rate ~ policy x n_civilians,Residual,821.73590931125,14388.0,,,,n/a

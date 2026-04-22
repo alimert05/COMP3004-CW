@@ -1,4 +1,5 @@
 """RouterGuide + RouterBlackboard — hybrid reactive-deliberative policy (L3)."""
+
 import math
 import numpy as np
 from collections import deque
@@ -41,15 +42,15 @@ class RouterBlackboard:
     decentralised spreading through potential functions.
     """
 
-    CLAIM_EXPIRY = 60         # ticks before a hotspot claim expires
-    POSITION_EXPIRY = 10      # ticks before a position becomes stale
-    EXIT_CLAIM_EXPIRY = 10    # ticks before an exit claim expires
-                              # (refreshed every tick during ESCORTING,
-                              # so TTL matches the positions pattern)
+    CLAIM_EXPIRY = 60  # ticks before a hotspot claim expires
+    POSITION_EXPIRY = 10  # ticks before a position becomes stale
+    EXIT_CLAIM_EXPIRY = 10  # ticks before an exit claim expires
+    # (refreshed every tick during ESCORTING,
+    # so TTL matches the positions pattern)
 
     def __init__(self):
-        self._claims = {}       # guide_id → (position, tick_claimed)
-        self._positions = {}    # guide_id → (position, tick_updated)
+        self._claims = {}  # guide_id → (position, tick_claimed)
+        self._positions = {}  # guide_id → (position, tick_updated)
         self._exit_claims = {}  # guide_id → (exit_pos, group_size, tick)
 
     # ── Claims (existing) ──
@@ -65,8 +66,7 @@ class RouterBlackboard:
         self._claims.pop(guide_id, None)
         self._exit_claims.pop(guide_id, None)
 
-    def is_claimed(self, position, current_tick, exclude_guide=None,
-                   radius=30.0):
+    def is_claimed(self, position, current_tick, exclude_guide=None, radius=30.0):
         """Check if a position is already claimed by another guide.
         Uses radius matching — positions within `radius` units count as same hotspot."""
         for gid, (pos, tick) in list(self._claims.items()):
@@ -109,7 +109,9 @@ class RouterBlackboard:
         entry stays fresh. Same pattern as `update_position` — if the guide
         dies silently, the entry auto-expires in EXIT_CLAIM_EXPIRY ticks."""
         self._exit_claims[guide_id] = (
-            np.array(exit_pos, dtype=float), int(group_size), tick,
+            np.array(exit_pos, dtype=float),
+            int(group_size),
+            tick,
         )
 
     def release_exit_claim(self, guide_id):
@@ -118,8 +120,9 @@ class RouterBlackboard:
         between arrival and natural expiry."""
         self._exit_claims.pop(guide_id, None)
 
-    def get_incoming_count(self, exit_pos, current_tick,
-                           exclude_guide=None, radius=15.0):
+    def get_incoming_count(
+        self, exit_pos, current_tick, exclude_guide=None, radius=15.0
+    ):
         """Sum of `group_size` across OTHER Routers currently escorting
         toward this exit (within `radius` world units — handles minor
         position variation).
@@ -183,8 +186,17 @@ class RouterGuide(Guide):
     RELEASING = "releasing"
     RETURNING = "returning"
 
-    def __init__(self, x, y, speed, env, rng, blackboard=None,
-                 n_civilians: int = 100, n_guides: int = 4):
+    def __init__(
+        self,
+        x,
+        y,
+        speed,
+        env,
+        rng,
+        blackboard=None,
+        n_civilians: int = 100,
+        n_guides: int = 4,
+    ):
         super().__init__(x, y, speed, env, rng)
 
         # Global scanning — no fixed territory. Blackboard coordinates Routers.
@@ -202,7 +214,7 @@ class RouterGuide(Guide):
         self._group = []
         self._base_max_group = round(3 * math.sqrt(n_civilians / max(1, n_guides)))
         self._floor = 5
-        self._min_group = 5   # Don't waste trips on 1-2 people
+        self._min_group = 5  # Don't waste trips on 1-2 people
         self._cached_effective_max = self._base_max_group
         self._cached_max_tick = -1
 
@@ -263,13 +275,19 @@ class RouterGuide(Guide):
         predicted_sg = None
         if fire_sys is not None:
             predicted_fg = predict_spread(
-                fire_sys.density, fire_sys._burnable,
-                fire_sys._fire_cells, fire_sys.spread_rate, HORIZON
+                fire_sys.density,
+                fire_sys._burnable,
+                fire_sys._fire_cells,
+                fire_sys.spread_rate,
+                HORIZON,
             )
         if smoke_sys is not None:
             predicted_sg = predict_spread(
-                smoke_sys.density, smoke_sys._smokeable,
-                smoke_sys._fire_cells, smoke_sys.spread_rate, HORIZON
+                smoke_sys.density,
+                smoke_sys._smokeable,
+                smoke_sys._fire_cells,
+                smoke_sys.spread_rate,
+                HORIZON,
             )
 
         gr, gc = getattr(self, "_last_grid_pos", (0, 0))
@@ -325,8 +343,10 @@ class RouterGuide(Guide):
         # preventing independent-decision pile-ups at the same exit.
         if self._phase == self.ESCORTING and self._escort_exit is not None:
             self._blackboard.update_exit_claim(
-                self._guide_id, self._escort_exit,
-                len(self._group), self._tick,
+                self._guide_id,
+                self._escort_exit,
+                len(self._group),
+                self._tick,
             )
 
         # Update density + congestion data
@@ -415,11 +435,22 @@ class RouterGuide(Guide):
             # 2) Mission complete: if no civilian anywhere needs help,
             #    self-evacuate (walk to nearest exit and leave the building).
             from evacsim.civilian import (
-                IDLE, REACTING, WANDERING, FOLLOWING, FLEEING_ROOM,
+                IDLE,
+                REACTING,
+                WANDERING,
+                FOLLOWING,
+                FLEEING_ROOM,
                 WALL_FOLLOWING,
             )
-            NEEDS_HELP = (IDLE, REACTING, WANDERING, FOLLOWING,
-                          FLEEING_ROOM, WALL_FOLLOWING)
+
+            NEEDS_HELP = (
+                IDLE,
+                REACTING,
+                WANDERING,
+                FOLLOWING,
+                FLEEING_ROOM,
+                WALL_FOLLOWING,
+            )
 
             # Safety net: if any civilians are still attached to this guide,
             # escort them to an exit rather than leave them as passengers.
@@ -483,7 +514,12 @@ class RouterGuide(Guide):
             sg = getattr(self, "_smoke_grid", None)
             rows, cols = env.grid.shape
             smoke_limit = 0.3 if self._group else 0.5
-            if fg is not None and 0 <= dr < rows and 0 <= dc < cols and fg[dr, dc] > 0.2:
+            if (
+                fg is not None
+                and 0 <= dr < rows
+                and 0 <= dc < cols
+                and fg[dr, dc] > 0.2
+            ):
                 self._waypoints.clear()
                 if self._group:
                     # Have civilians — escort them to safety instead of scanning
@@ -492,7 +528,12 @@ class RouterGuide(Guide):
                     self._phase = self.SCANNING
                     self.vel = np.zeros(2)
                 return
-            if sg is not None and 0 <= dr < rows and 0 <= dc < cols and sg[dr, dc] > smoke_limit:
+            if (
+                sg is not None
+                and 0 <= dr < rows
+                and 0 <= dc < cols
+                and sg[dr, dc] > smoke_limit
+            ):
                 self._waypoints.clear()
                 if self._group:
                     self._start_escort(env, smoke, civilians)
@@ -643,7 +684,8 @@ class RouterGuide(Guide):
                     # rerouting from stampeding everyone to the same exit.
                     current_queue = self._exit_counts.get((ex, ey), 0)
                     incoming = self._blackboard.get_incoming_count(
-                        [ex, ey], self._tick,
+                        [ex, ey],
+                        self._tick,
                         exclude_guide=self._guide_id,
                     )
                     cong = (current_queue + incoming) * 30.0
@@ -664,16 +706,18 @@ class RouterGuide(Guide):
                 # genuinely cleaner routes, and the validator rejects any
                 # path whose waypoints exceed the danger threshold.
                 dij_path = dijkstra_congestion_path(
-                    env, self.pos, np.array(best_exit),
-                    fire_grid=fg, smoke_grid=sg,
+                    env,
+                    self.pos,
+                    np.array(best_exit),
+                    fire_grid=fg,
+                    smoke_grid=sg,
                     civilian_density=self._density_grid,
                 )
                 dij_safe = True
                 if dij_path and danger is not None:
                     for wp in dij_path:
                         wr, wc = env.world_to_grid(wp[0], wp[1])
-                        if (0 <= wr < danger.shape[0]
-                                and 0 <= wc < danger.shape[1]):
+                        if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                             if danger[wr, wc] > 0.3:
                                 dij_safe = False
                                 break
@@ -682,7 +726,9 @@ class RouterGuide(Guide):
                 else:
                     # BFS fallback with danger grid (empty OR unsafe)
                     self._waypoints = bfs_path(
-                        env, self.pos, np.array(best_exit),
+                        env,
+                        self.pos,
+                        np.array(best_exit),
                         fire_grid=danger,
                     )
 
@@ -698,7 +744,7 @@ class RouterGuide(Guide):
         near_current_exit = (
             self._escort_exit is not None
             and np.linalg.norm(self.pos - np.array(self._escort_exit))
-                < env.cell_size * 5
+            < env.cell_size * 5
         )
         if (
             self._eval_counter == 0
@@ -715,7 +761,9 @@ class RouterGuide(Guide):
             # against our current target).
             cur_queue = self._exit_counts.get((cx, cy), 0)
             cur_incoming = self._blackboard.get_incoming_count(
-                [cx, cy], self._tick, exclude_guide=self._guide_id,
+                [cx, cy],
+                self._tick,
+                exclude_guide=self._guide_id,
             )
             cur_cong = (cur_queue + cur_incoming) * 30.0
             cur_smoke = smoke.get_density_at(cx, cy) * 200.0
@@ -729,7 +777,9 @@ class RouterGuide(Guide):
                 # A1 — same effective-congestion adjustment for candidates
                 cand_queue = self._exit_counts.get((ex, ey), 0)
                 cand_incoming = self._blackboard.get_incoming_count(
-                    [ex, ey], self._tick, exclude_guide=self._guide_id,
+                    [ex, ey],
+                    self._tick,
+                    exclude_guide=self._guide_id,
                 )
                 cong = (cand_queue + cand_incoming) * 30.0
                 s_pen = smoke.get_density_at(ex, ey) * 200.0
@@ -756,8 +806,11 @@ class RouterGuide(Guide):
                         danger = None
 
                     dij_path = dijkstra_congestion_path(
-                        env, self.pos, np.array((ex, ey)),
-                        fire_grid=fg, smoke_grid=sg,
+                        env,
+                        self.pos,
+                        np.array((ex, ey)),
+                        fire_grid=fg,
+                        smoke_grid=sg,
                         civilian_density=self._density_grid,
                     )
 
@@ -771,8 +824,7 @@ class RouterGuide(Guide):
                     if dij_path and danger is not None:
                         for wp in dij_path:
                             wr, wc = env.world_to_grid(wp[0], wp[1])
-                            if (0 <= wr < danger.shape[0]
-                                    and 0 <= wc < danger.shape[1]):
+                            if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                                 if danger[wr, wc] > 0.3:
                                     dij_safe = False
                                     break
@@ -782,7 +834,9 @@ class RouterGuide(Guide):
                     else:
                         # BFS fallback with danger grid (empty OR unsafe)
                         self._waypoints = bfs_path(
-                            env, self.pos, np.array((ex, ey)),
+                            env,
+                            self.pos,
+                            np.array((ex, ey)),
                             fire_grid=danger,
                         )
                     break  # Switch once per re-evaluation
@@ -820,16 +874,18 @@ class RouterGuide(Guide):
                     danger = None
 
                 dij_path = dijkstra_congestion_path(
-                    env, self.pos, np.array(self._escort_exit),
-                    fire_grid=fg, smoke_grid=sg,
+                    env,
+                    self.pos,
+                    np.array(self._escort_exit),
+                    fire_grid=fg,
+                    smoke_grid=sg,
                     civilian_density=self._density_grid,
                 )
                 dij_safe = True
                 if dij_path and danger is not None:
                     for wp in dij_path:
                         wr, wc = env.world_to_grid(wp[0], wp[1])
-                        if (0 <= wr < danger.shape[0]
-                                and 0 <= wc < danger.shape[1]):
+                        if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                             if danger[wr, wc] > 0.3:
                                 dij_safe = False
                                 break
@@ -837,7 +893,9 @@ class RouterGuide(Guide):
                     self._waypoints = dij_path
                 else:
                     self._waypoints = bfs_path(
-                        env, self.pos, np.array(self._escort_exit),
+                        env,
+                        self.pos,
+                        np.array(self._escort_exit),
                         fire_grid=danger,
                     )
             if not self._waypoints:
@@ -858,10 +916,7 @@ class RouterGuide(Guide):
                 continue
             dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
             dist_guide = np.linalg.norm(civ.pos - self.pos)
-            if (
-                dist_exit < env.cell_size * 5
-                or dist_guide < env.cell_size * 3
-            ):
+            if dist_exit < env.cell_size * 5 or dist_guide < env.cell_size * 3:
                 civ._set_exit_target_force(env, self._escort_exit)
             else:
                 still.append(civ)
@@ -977,7 +1032,13 @@ class RouterGuide(Guide):
         Cluster scoring: size × (1 - centroid_smoke × 0.5).
         Skips targets in fire or heavy smoke (unsafe to reach).
         Skips hotspots already claimed by other Routers (blackboard)."""
-        from evacsim.civilian import ESCAPED, DEAD, MOVING_TO_EXIT, FOLLOWING_GUIDE, QUEUED
+        from evacsim.civilian import (
+            ESCAPED,
+            DEAD,
+            MOVING_TO_EXIT,
+            FOLLOWING_GUIDE,
+            QUEUED,
+        )
 
         # 1. Filter to civilians needing help — GLOBAL scan (no territory filter)
         candidates = []
@@ -1010,13 +1071,12 @@ class RouterGuide(Guide):
             # lecture reference: intelligentAgents_coordination.pptx
             # (cell division vs. decentralised spreading via potentials).
             other_positions = self._blackboard.get_other_positions(
-                exclude_guide=self._guide_id, current_tick=self._tick,
+                exclude_guide=self._guide_id,
+                current_tick=self._tick,
             )
             # Map diagonal used to normalise distances to [0, 1] so the
             # formula adapts to any map size.
-            map_diag = float(np.hypot(
-                rows * env.cell_size, cols * env.cell_size
-            ))
+            map_diag = float(np.hypot(rows * env.cell_size, cols * env.cell_size))
             # Decay constant: repulsion drops to ~50% at 10% of map diag.
             REPULSION_DECAY = 10.0
             # Max bonus: a hotspot maximally far from all other guides
@@ -1029,8 +1089,12 @@ class RouterGuide(Guide):
             best_score = 0
 
             for cluster_indices in clusters:
-                cx = sum(positions[i][0] for i in cluster_indices) / len(cluster_indices)
-                cy = sum(positions[i][1] for i in cluster_indices) / len(cluster_indices)
+                cx = sum(positions[i][0] for i in cluster_indices) / len(
+                    cluster_indices
+                )
+                cy = sum(positions[i][1] for i in cluster_indices) / len(
+                    cluster_indices
+                )
 
                 # Safety: skip clusters in fire/heavy smoke
                 cr, cc = env.world_to_grid(cx, cy)
@@ -1093,9 +1157,19 @@ class RouterGuide(Guide):
             for civ in candidates:
                 # Safety: skip civilians in fire/heavy smoke zones
                 cr, cc = env.world_to_grid(civ.pos[0], civ.pos[1])
-                if fg is not None and 0 <= cr < rows and 0 <= cc < cols and fg[cr, cc] > 0.2:
+                if (
+                    fg is not None
+                    and 0 <= cr < rows
+                    and 0 <= cc < cols
+                    and fg[cr, cc] > 0.2
+                ):
                     continue
-                if sg is not None and 0 <= cr < rows and 0 <= cc < cols and sg[cr, cc] > smoke_limit:
+                if (
+                    sg is not None
+                    and 0 <= cr < rows
+                    and 0 <= cc < cols
+                    and sg[cr, cc] > smoke_limit
+                ):
                     continue
                 dist = np.linalg.norm(self.pos - civ.pos)
                 if dist < best_dist:
@@ -1240,19 +1314,31 @@ class RouterGuide(Guide):
 
         if fire_sys is not None and smoke_sys is not None:
             # Estimate ticks to reach each exit (rough: straight-line / group speed)
-            avg_dist = np.mean([np.hypot(self.pos[0] - ex, self.pos[1] - ey)
-                                for ex, ey in self.known_exits])
+            avg_dist = np.mean(
+                [
+                    np.hypot(self.pos[0] - ex, self.pos[1] - ey)
+                    for ex, ey in self.known_exits
+                ]
+            )
             group_speed = max(self.speed * 0.75, 0.1)
             est_ticks = int(avg_dist / group_speed)
             est_ticks = min(est_ticks, 200)  # Cap at 200 ticks
 
             if est_ticks > 10:  # Only predict if escort will take meaningful time
                 predicted_fg = predict_spread(
-                    fire_sys.density, fire_sys._burnable,
-                    fire_sys._fire_cells, fire_sys.spread_rate, est_ticks)
+                    fire_sys.density,
+                    fire_sys._burnable,
+                    fire_sys._fire_cells,
+                    fire_sys.spread_rate,
+                    est_ticks,
+                )
                 predicted_sg = predict_spread(
-                    smoke_sys.density, smoke_sys._smokeable,
-                    smoke_sys._fire_cells, smoke_sys.spread_rate, est_ticks)
+                    smoke_sys.density,
+                    smoke_sys._smokeable,
+                    smoke_sys._fire_cells,
+                    smoke_sys.spread_rate,
+                    est_ticks,
+                )
 
         # ── Score each exit using PREDICTED conditions ──
         best_exit, best_score = None, float("inf")
@@ -1263,16 +1349,26 @@ class RouterGuide(Guide):
             # sees pending arrivals from peers and avoids pile-ups.
             current_queue = self._exit_counts.get((ex, ey), 0)
             incoming = self._blackboard.get_incoming_count(
-                [ex, ey], self._tick, exclude_guide=self._guide_id,
+                [ex, ey],
+                self._tick,
+                exclude_guide=self._guide_id,
             )
             congestion = (current_queue + incoming) * 30.0
             # Use predicted smoke/fire at exit (will it be safe when we arrive?)
             er, ec = env.world_to_grid(ex, ey)
             smoke_pen = 0
             fire_pen = 0
-            if predicted_sg is not None and 0 <= er < predicted_sg.shape[0] and 0 <= ec < predicted_sg.shape[1]:
+            if (
+                predicted_sg is not None
+                and 0 <= er < predicted_sg.shape[0]
+                and 0 <= ec < predicted_sg.shape[1]
+            ):
                 smoke_pen = predicted_sg[er, ec] * 200.0
-            if predicted_fg is not None and 0 <= er < predicted_fg.shape[0] and 0 <= ec < predicted_fg.shape[1]:
+            if (
+                predicted_fg is not None
+                and 0 <= er < predicted_fg.shape[0]
+                and 0 <= ec < predicted_fg.shape[1]
+            ):
                 fire_pen = predicted_fg[er, ec] * 500.0
             score = dist + congestion + smoke_pen + fire_pen
             if score < best_score:
@@ -1330,7 +1426,13 @@ class RouterGuide(Guide):
 
         This gives Router early congestion awareness even before civilians
         have found exits, enabling smarter exit selection from tick 1."""
-        from evacsim.civilian import MOVING_TO_EXIT, QUEUED, ESCAPED, DEAD, FOLLOWING_GUIDE
+        from evacsim.civilian import (
+            MOVING_TO_EXIT,
+            QUEUED,
+            ESCAPED,
+            DEAD,
+            FOLLOWING_GUIDE,
+        )
 
         self._exit_counts = {(ex, ey): 0.0 for ex, ey in self.known_exits}
         for civ in civilians:
@@ -1406,6 +1508,16 @@ def spawn_router_guides(env, n_guides, speed=2.0, seed=77, n_civilians=100):
     guides = []
     for i in range(n_guides):
         ex, ey = exits[i % len(exits)]
-        guides.append(RouterGuide(ex, ey, speed, env, rng, blackboard=blackboard,
-                                  n_civilians=n_civilians, n_guides=n_guides))
+        guides.append(
+            RouterGuide(
+                ex,
+                ey,
+                speed,
+                env,
+                rng,
+                blackboard=blackboard,
+                n_civilians=n_civilians,
+                n_guides=n_guides,
+            )
+        )
     return guides
