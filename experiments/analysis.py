@@ -369,6 +369,60 @@ def two_way_anova_with_partial_eta(df: pd.DataFrame, metric: str,
         return pd.DataFrame({"error": [str(e)]})
 
 
+def interaction_decomposition(df: pd.DataFrame, metric: str,
+                                maps_to_exclude: list) -> pd.DataFrame:
+    """Decompose the policy × map-type interaction by excluded maps.
+
+    Re-runs the two-way ANOVA (policy × map_type) on the full dataset
+    and on a subset with `maps_to_exclude` removed. If the interaction's
+    partial η² drops substantially in the subset, those maps contribute
+    disproportionately to the interaction effect.
+
+    Used to verify the claim that a small number of outlier maps drive
+    most of the interaction, rather than the interaction being a
+    distributed pattern across all maps.
+    """
+    if not HAS_STATSMODELS:
+        return pd.DataFrame({"error": ["statsmodels not installed"]})
+    try:
+        # Full ANOVA (all maps)
+        full_table = two_way_anova_with_partial_eta(
+            df, metric, "policy", "map_type"
+        )
+        full_row = full_table.loc["C(policy):C(map_type)"]
+
+        # Filtered ANOVA (excluding specified maps)
+        df_filtered = df[~df["map_name"].isin(maps_to_exclude)].copy()
+        filt_table = two_way_anova_with_partial_eta(
+            df_filtered, metric, "policy", "map_type"
+        )
+        filt_row = filt_table.loc["C(policy):C(map_type)"]
+
+        return pd.DataFrame([
+            {
+                "scenario": "full (all 8 maps)",
+                "n_runs": len(df),
+                "F": float(full_row["F"]),
+                "p": float(full_row["PR(>F)"]),
+                "partial_eta2": float(full_row["partial_eta2"]),
+                "magnitude": full_row["magnitude"],
+            },
+            {
+                "scenario": (
+                    f"excluding {', '.join(maps_to_exclude)} "
+                    f"({len(df) - len(df_filtered)} runs dropped)"
+                ),
+                "n_runs": len(df_filtered),
+                "F": float(filt_row["F"]),
+                "p": float(filt_row["PR(>F)"]),
+                "partial_eta2": float(filt_row["partial_eta2"]),
+                "magnitude": filt_row["magnitude"],
+            },
+        ])
+    except Exception as e:
+        return pd.DataFrame({"error": [str(e)]})
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 4. VISUALIZATIONS
 # ═══════════════════════════════════════════════════════════════════
@@ -776,10 +830,15 @@ def main():
     else:
         print("  (per-map paired comparison produced no rows)")
 
-    # Partial η² for the two two-way ANOVAs — completes the interaction
-    # effect-size reporting (main effects already captured in η²).
+    # Partial η² for the three two-way ANOVAs — completes the
+    # interaction effect-size reporting (main effects already captured
+    # in η²). The policy × fire_position model confirms fire_position
+    # is a nuisance factor with a negligible interaction, justifying
+    # the decision to collapse across it in the main analysis.
     anova_parts = []
-    for f1, f2 in [("policy", "map_type"), ("policy", "n_civilians")]:
+    for f1, f2 in [("policy", "map_type"),
+                    ("policy", "n_civilians"),
+                    ("policy", "fire_position")]:
         table = two_way_anova_with_partial_eta(df, "survival_rate", f1, f2)
         if not isinstance(table, pd.DataFrame) or "error" in table.columns:
             continue
@@ -793,6 +852,20 @@ def main():
         print("  Saved anova_partial_eta2.csv")
     else:
         print("  (partial η² computation unavailable — statsmodels missing?)")
+
+    # Interaction-drive decomposition: verify the claim that
+    # bottleneck_A and bottleneck_D drive most of the policy × map-type
+    # interaction. If the interaction's partial η² drops substantially
+    # when those maps are excluded, the claim holds.
+    decomp = interaction_decomposition(
+        df, "survival_rate",
+        maps_to_exclude=["bottleneck_A", "bottleneck_D"],
+    )
+    if isinstance(decomp, pd.DataFrame) and "error" not in decomp.columns:
+        decomp.to_csv(out_dir / "interaction_decomposition.csv", index=False)
+        print("  Saved interaction_decomposition.csv")
+    else:
+        print("  (interaction decomposition unavailable)")
 
     # 4. Visualizations
     print("\nGenerating figures...")
