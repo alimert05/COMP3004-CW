@@ -1,7 +1,9 @@
-"""Guide agents package (split from the monolithic evacsim/guide.py).
+"""Guide agents package.
 
-Public API re-exports — every name that was importable from
-``evacsim.guide`` remains importable from ``evacsim.guides``.
+Re-exports the public API: the guide policy classes (BeaconGuide,
+SweeperGuide, RouterGuide), their blackboards (SweeperBlackboard,
+RouterBlackboard), the spawn helpers, the Guide base class, and the
+shared path-finding and clustering utilities.
 """
 from evacsim.guides.common import (
     bfs_path,

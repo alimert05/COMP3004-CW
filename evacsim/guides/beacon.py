@@ -1,4 +1,12 @@
-"""BeaconGuide — stationary broadcast policy (L1 passive)."""
+"""BeaconGuide: stationary broadcast policy.
+
+The guide walks to a position two to three cells in front of an
+assigned exit and broadcasts from there. Each tick, every civilian
+within hearing range rolls against a probabilistic hearing model
+that combines distance with listener-side and source-side smoke. On
+success the civilian either reacts sooner (if IDLE or REACTING) or
+has its exit target set directly (if already moving).
+"""
 import math
 import numpy as np
 from collections import deque
@@ -10,19 +18,19 @@ from evacsim.guides.common import bfs_path
 
 
 class BeaconGuide(Guide):
-    """
-    Beacon policy: stand near an assigned exit and broadcast.
+    """Stationary guide that broadcasts the location of an assigned exit.
 
     Behaviour:
-      1. On creation, assigned to an exit
-      2. Uses BFS pathfinding to navigate through corridors to the exit
-      3. Stands 2-3 cells in front of exit and broadcasts
-      4. Any civilian within hearing range learns the exit location
+        1. On creation, assigned to a specific exit (round-robin in
+           spawn_beacon_guides).
+        2. Plans a BFS path from spawn to the beacon position.
+        3. Stands two to three cells in front of the exit and broadcasts.
+        4. Every tick, civilians within hearing range roll independently
+           against a probabilistic hearing model. On success they receive
+           the exit location.
 
-    Why it helps:
-      - Civilians with 1-cell vision would never find exits on their own
-      - Guide's broadcast (8 cells) reaches civilians in corridors
-      - Even in smoke (3-cell broadcast), much better than blind civilians
+    Self-evacuation (inherited from Guide) overrides broadcasting when
+    the guide's health drops below the threshold.
     """
 
     def __init__(self, x: float, y: float, speed: float,
@@ -40,7 +48,7 @@ class BeaconGuide(Guide):
         self._in_position = False
 
     def _find_nearest_exit(self) -> np.ndarray:
-        """Find the exit closest to spawn position."""
+        """Return the exit closest to the current spawn position."""
         best = None
         best_dist = float("inf")
         for ex, ey in self.known_exits:
@@ -51,13 +59,18 @@ class BeaconGuide(Guide):
         return best
 
     def _find_beacon_position(self) -> np.ndarray:
-        """Stand 2 cells in front of the exit (into the building).
-        'In front' = the direction where FLOOR cells are (not walls)."""
+        """Return a world position two cells inward of the assigned exit.
+
+        The inward direction is the cardinal neighbour that is a FLOOR
+        cell (not a wall). If the two-cell offset lands on a wall, the
+        method retries at one cell inward, then falls back to the exit
+        cell itself.
+        """
         ex, ey = self.assigned_exit
         gr, gc = self.env.world_to_grid(ex, ey)
         rows, cols = self.env.grid.shape
 
-        # Find which direction is "inward" — check neighbors for FLOOR
+        # Identify the inward direction by looking for a FLOOR neighbour.
         inward_dr, inward_dc = 0, 0
         for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nr, nc = gr + dr, gc + dc
@@ -66,50 +79,49 @@ class BeaconGuide(Guide):
                     inward_dr, inward_dc = dr, dc
                     break
 
-        # Step 2 cells inward
+        # Step two cells inward.
         target_r = gr + inward_dr * 2
         target_c = gc + inward_dc * 2
         if (0 <= target_r < rows and 0 <= target_c < cols
                 and self.env.grid[target_r, target_c] != CellType.WALL):
             return np.array(self.env.grid_to_world(target_r, target_c), dtype=float)
 
-        # Try 1 cell inward
+        # Try one cell inward.
         target_r = gr + inward_dr
         target_c = gc + inward_dc
         if (0 <= target_r < rows and 0 <= target_c < cols
                 and self.env.grid[target_r, target_c] != CellType.WALL):
             return np.array(self.env.grid_to_world(target_r, target_c), dtype=float)
 
-        # Fallback: stand at exit
+        # Fallback: stand at the exit cell itself.
         return self.assigned_exit.copy()
 
     def update(
         self, env: Environment, smoke: SmokeSystem, fire: FireSystem, civilians: list
     ) -> None:
-        """Move to beacon position via BFS path, then stand and broadcast."""
+        """Walk to the beacon position via BFS, then broadcast each tick."""
         super().update(env, smoke, fire, civilians)
         if not self.alive:
             return
 
-        # Self-evacuation overrides everything
+        # Self-evacuation overrides broadcasting.
         if self._do_self_evacuation(env):
             return
 
-        # --- Phase 1: Follow path to beacon position ---
+        # Phase 1: follow the BFS path to the beacon position.
         if not self._in_position:
             if not self._waypoints:
-                # Path done — lock in position
+                # Path complete, lock in position.
                 self._in_position = True
                 self.vel = np.array([0.0, 0.0])
             else:
                 self._follow_path(env)
             return
 
-        # --- Phase 2: Probabilistic broadcast (sound-based) ---
-        # Hearing probability decreases with distance and smoke/noise.
-        # Sound penetrates walls (no LOS check) but attenuates.
-        # Based on acoustic propagation in fire conditions.
-        max_range = self.broadcast_radius  # 100 units (10 cells / ~30m)
+        # Phase 2: probabilistic broadcast.
+        # Sound penetrates walls (no line-of-sight check) but attenuates
+        # with distance and with smoke at both endpoints.
+        max_range = self.broadcast_radius  # 100 units, ten cells.
 
         from evacsim.civilian import (
             MOVING_TO_EXIT,
@@ -130,26 +142,24 @@ class BeaconGuide(Guide):
             if dist >= max_range:
                 continue
 
-            # Distance factor: linear falloff (closer = easier to hear)
+            # Distance factor: linear falloff with a floor of zero at max_range.
             distance_factor = 1.0 - (dist / max_range)
 
-            # Listener-side: smoke at civilian's position (irritation, disorientation)
+            # Listener-side smoke factor (irritation, disorientation at the civilian).
             civ_smoke = smoke.get_density_at(civ.pos[0], civ.pos[1])
             listener_factor = max(0.3, 1.0 - civ_smoke * 0.5)
 
-            # Source-side: smoke at guide's position (ambient noise from fire)
-            # Guide has mask so less affected, but noise still reduces effectiveness
+            # Source-side smoke factor. The guide's mask reduces the effect
+            # but ambient noise from fire still degrades broadcast quality.
             guide_smoke = smoke.get_density_at(self.pos[0], self.pos[1])
             source_factor = max(0.5, 1.0 - guide_smoke * 0.3)
 
-            # Final hearing probability this tick
             hear_chance = distance_factor * listener_factor * source_factor
 
-            # Roll the dice
             if self._rng.random() > hear_chance:
-                continue  # Didn't hear this tick — try again next tick
+                continue  # Roll failed this tick.
 
-            # Civilian heard the guide!
+            # The civilian heard the broadcast.
             if civ.state == IDLE:
                 civ.state = REACTING
                 civ._reaction_counter = 0
@@ -165,9 +175,12 @@ class BeaconGuide(Guide):
 def spawn_beacon_guides(
     env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77
 ) -> list[BeaconGuide]:
-    """Spawn beacon guides at exits. Simple round-robin assignment.
-    Each guide stands 2-3 cells from its assigned exit and broadcasts.
-    Overlap on clustered-exit maps is a realistic Beacon limitation."""
+    """Spawn beacon guides at exits using round-robin assignment.
+
+    Each guide is placed at one exit; if there are more guides than
+    exits, the assignment wraps around. Overlapping beacons on
+    clustered-exit maps is left as a realistic limitation of the policy.
+    """
     rng = np.random.default_rng(seed)
     exits = list(env.exits)
 
