@@ -1,0 +1,14 @@
+# Python 3.10+ required; developed on 3.13.2.
+
+# Core simulation
+numpy>=1.23
+
+# Visual mode (test_map_visual.py)
+pygame>=2.5
+Pillow>=10.0
+
+# Analysis (experiments/analysis.py)
+pandas>=2.0
+matplotlib>=3.7
+scipy>=1.11
+statsmodels>=0.14
