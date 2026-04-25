@@ -66,6 +66,6 @@ Maps: 8 | Policies: 4 | Crowd sizes: 3 | Fire positions: 5
 
 ======================================================================
 Symbols: * p<0.05   ** p<0.01   *** p<0.001
-Cohen's d: 0.2=small, 0.5=medium, 0.8=large
-eta2 (eta-squared): 0.01=small, 0.06=medium, 0.14=large
+Cohen's d magnitudes: 0.2=small, 0.5=medium, 0.8=large
+eta-squared magnitudes: 0.01=small, 0.06=medium, 0.14=large
 ======================================================================
