@@ -1,13 +1,13 @@
-"""Backwards-compatibility shim.
+"""Compatibility shim for the legacy import path.
 
-The guide implementation was split across ``evacsim/guides/`` (common,
-base, beacon, sweeper, router) during the pre-experiment refactor.
-This shim preserves the old ``from evacsim.guide import ...`` import
-paths used by simulation.py, civilian.py, test_map_visual.py, and the
-debug tests, so nothing outside the package needs to change.
+The guide implementation lives in evacsim/guides/ as a package
+(common, base, beacon, sweeper, router). This shim re-exports every
+public name so that the older 'from evacsim.guide import ...' import
+path continues to work for simulation.py, civilian.py,
+test_map_visual.py, and the debug tests.
 """
 from evacsim.guides import *  # noqa: F401, F403
-from evacsim.guides import (  # explicit re-exports for static analysis
+from evacsim.guides import (  # Explicit re-exports for static analysis.
     bfs_path,
     dijkstra_congestion_path,
     predict_spread,

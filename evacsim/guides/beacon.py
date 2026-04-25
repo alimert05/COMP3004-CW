@@ -7,9 +7,7 @@ that combines distance with listener-side and source-side smoke. On
 success the civilian either reacts sooner (if IDLE or REACTING) or
 has its exit target set directly (if already moving).
 """
-import math
 import numpy as np
-from collections import deque
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem

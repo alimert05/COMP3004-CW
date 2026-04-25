@@ -1,3 +1,14 @@
+"""Pygame visual mode for the simulation.
+
+Loads a map and runs the simulation in real time with a Pygame window.
+Civilians are coloured by state, fire and smoke are animated GIFs,
+guides are drawn as orange diamonds with a health bar above each.
+
+Keyboard controls:
+    1 / 2 / 5 / 0    Set simulation speed multiplier (1x, 2x, 5x, 10x).
+    ESC              Quit.
+"""
+
 import sys
 import pygame
 from PIL import Image
@@ -29,9 +40,9 @@ from evacsim.civilian import (
 from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides, spawn_router_guides
 
 
-# =====================================================================
-# STEP 1: LOAD THE MAP
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 1: load the map
+# --------------------------------------------------------------------
 
 if len(sys.argv) > 1:
     map_file = sys.argv[1]
@@ -42,9 +53,9 @@ config = SimConfig(map_file=map_file, fire_position=VISUAL_FIRE_POSITION)
 env = Environment(config)
 
 
-# =====================================================================
-# STEP 2: CALCULATE WINDOW SIZE
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 2: window size
+# --------------------------------------------------------------------
 
 SCALE = 3
 CELL = int(config.cell_size * SCALE)
@@ -52,9 +63,9 @@ WIN_W = env.cols * CELL
 WIN_H = env.rows * CELL
 
 
-# =====================================================================
-# STEP 3: START PYGAME AND LOAD TILE IMAGES
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 3: start Pygame and load tile images
+# --------------------------------------------------------------------
 
 pygame.init()
 
@@ -71,12 +82,13 @@ TILES = {
 }
 
 
-# =====================================================================
-# STEP 4: LOAD GIF FRAMES
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 4: load animated GIF frames
+# --------------------------------------------------------------------
 
 
 def load_gif_frames(path, size):
+    """Load every frame of a GIF, scale to size, return as Pygame surfaces."""
     frames = []
     gif = Image.open(path)
     for i in range(gif.n_frames):
@@ -93,23 +105,22 @@ fire_frames = load_gif_frames("assets/fire.gif", (CELL, CELL))
 smoke_frames = load_gif_frames("assets/smoke gif.gif", (CELL, CELL))
 
 
-# =====================================================================
-# STEP 5: CREATE FIRE AND SMOKE SYSTEMS (diffusion)
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 5: build fire and smoke systems
+# --------------------------------------------------------------------
 
 smoke_system = SmokeSystem(env, spread_rate=0.02)
 fire_system = FireSystem(env, spread_rate=0.005)
-# Fire–smoke coupling (Makmul 2020 source term)
+# Fire-and-smoke coupling: smoke is sourced from fire cells.
 smoke_system._fire = fire_system
 
 
-# =====================================================================
-# STEP 5b: SPAWN CIVILIANS
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 5b: spawn civilians and guides
+# --------------------------------------------------------------------
 
 civilians = spawn_civilians(env, n=VISUAL_CIVILIAN_NUMBER, speed=1.5, seed=99)
 
-# Spawn guides based on config
 guides = []
 if VISUAL_GUIDES_ENABLED:
     n = VISUAL_GUIDE_COUNT if VISUAL_GUIDE_COUNT is not None else len(env.exits)
@@ -122,14 +133,14 @@ if VISUAL_GUIDES_ENABLED:
         guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77,
                                      n_civilians=VISUAL_CIVILIAN_NUMBER)
 
-# The circle radius in pixels (for drawing)
+# Drawing radii in pixels.
 CIV_RADIUS = max(4, CELL // 4)
 GUIDE_RADIUS = max(6, CELL // 3)
 
 
-# =====================================================================
-# STEP 6: CREATE THE WINDOW
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 6: create the window
+# --------------------------------------------------------------------
 
 screen = pygame.display.set_mode((WIN_W, WIN_H))
 pygame.display.set_caption(f"Map: {map_file}")
@@ -137,9 +148,9 @@ clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 24)
 
 
-# =====================================================================
-# STEP 7: PRE-DRAW THE STATIC MAP
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 7: pre-draw the static map onto an offscreen surface
+# --------------------------------------------------------------------
 
 map_surface = pygame.Surface((WIN_W, WIN_H))
 
@@ -150,16 +161,16 @@ for r in range(env.rows):
         map_surface.blit(tile, (c * CELL, r * CELL))
 
 
-# =====================================================================
-# STEP 8: ANIMATION LOOP
-# =====================================================================
+# --------------------------------------------------------------------
+# Step 8: animation loop
+# --------------------------------------------------------------------
 
 fire_frame_idx = 0
 smoke_frame_idx = 0
 frame_timer = 0
 FRAME_DELAY = 4
 tick = 0
-sim_speed = 1  # 1x, 2x, 5x, 10x — press 1/2/5/0 to change
+sim_speed = 1  # 1x, 2x, 5x, 10x. Press 1 / 2 / 5 / 0 to change.
 
 running = True
 while running:
@@ -178,18 +189,18 @@ while running:
             elif event.key == pygame.K_0:
                 sim_speed = 10
 
-    # Run multiple simulation steps per frame for speed-up
+    # Run several simulation steps per frame to support speed-up.
     for _ in range(sim_speed):
         smoke_system.step()
         fire_system.step()
         tick += 1
-        # Update guides first (they broadcast to civilians)
+        # Update guides first (they may broadcast to civilians).
         for guide in guides:
             guide.update(env, smoke_system, fire_system, civilians)
         for civ in civilians:
             civ.update(env, smoke_system, fire_system, civilians)
 
-        # Exit queue processing — max 2 civilians per exit per tick
+        # Exit-queue processing: at most two civilians per exit per tick.
         import numpy as np
         EXIT_THROUGHPUT = 2
         exit_queues = {}
@@ -213,10 +224,10 @@ while running:
                 if rank < EXIT_THROUGHPUT:
                     civilians[idx].state = ESCAPED
 
-    # Draw map
+    # Draw the static map.
     screen.blit(map_surface, (0, 0))
 
-    # Draw smoke
+    # Draw smoke.
     smoke_grid = smoke_system.get_density_grid()
     for r in range(env.rows):
         for c in range(env.cols):
@@ -227,7 +238,7 @@ while running:
                 frame.set_alpha(alpha)
                 screen.blit(frame, (c * CELL, r * CELL))
 
-    # Draw fire
+    # Draw fire.
     fire_grid = fire_system.get_density_grid()
     for r in range(env.rows):
         for c in range(env.cols):
@@ -238,36 +249,36 @@ while running:
                 frame.set_alpha(alpha)
                 screen.blit(frame, (c * CELL, r * CELL))
 
-    # Draw civilians — colour by state, skip escaped
+    # Draw civilians, coloured by state. Skip escaped civilians.
     for civ in civilians:
         if civ.state == ESCAPED:
             continue
         sx = int(civ.pos[0] * SCALE)
         sy = int(civ.pos[1] * SCALE)
         if civ.state == DEAD:
-            colour = (200, 30, 30)    # red — dead
+            colour = (200, 30, 30)    # Red: dead.
         elif civ.state == QUEUED:
-            colour = (255, 255, 255)  # white — waiting in exit queue
+            colour = (255, 255, 255)  # White: waiting in the exit queue.
         elif civ.state == MOVING_TO_EXIT:
-            colour = (50, 220, 50)    # green — heading to exit
+            colour = (50, 220, 50)    # Green: heading to an exit.
         elif civ.state == FLEEING_ROOM:
-            colour = (255, 150, 50)   # orange — fleeing room
+            colour = (255, 150, 50)   # Orange: fleeing the current room.
         elif civ.state == FOLLOWING_GUIDE:
-            colour = (0, 200, 200)    # cyan — in sweeper's group (boids)
+            colour = (0, 200, 200)    # Cyan: in a guide's group.
         elif civ.state == FOLLOWING:
-            colour = (255, 200, 50)   # yellow — herding (following crowd)
+            colour = (255, 200, 50)   # Yellow: herding (following crowd).
         elif civ.state == WALL_FOLLOWING:
-            colour = (200, 100, 255)  # purple — blind, wall-following
+            colour = (200, 100, 255)  # Purple: blind, hand-on-wall.
         elif civ.state == REACTING:
-            colour = (255, 255, 150)  # light yellow — noticed danger, processing
+            colour = (255, 255, 150)  # Light yellow: noticed danger, processing.
         elif civ.state == IDLE:
-            colour = (180, 180, 180)  # grey — at desk, unaware
+            colour = (180, 180, 180)  # Grey: at desk, unaware.
         else:
-            colour = (50, 120, 255)   # blue — wandering
+            colour = (50, 120, 255)   # Blue: wandering.
         pygame.draw.circle(screen, colour, (sx, sy), CIV_RADIUS)
         pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
 
-    # Draw guides — orange diamonds (or red if self-evacuating)
+    # Draw guides as diamonds. Orange when on duty, red when self-evacuating.
     for guide in guides:
         if not guide.alive:
             continue
@@ -275,18 +286,17 @@ while running:
         gy = int(guide.pos[1] * SCALE)
         r = GUIDE_RADIUS
 
-        # Color: orange normally, red when self-evacuating
         if guide._self_evacuating:
-            fill_colour = (220, 50, 50)  # Red — escaping
+            fill_colour = (220, 50, 50)  # Red: escaping.
         else:
-            fill_colour = (255, 140, 0)  # Orange — on duty
+            fill_colour = (255, 140, 0)  # Orange: on duty.
 
-        # Draw diamond shape
+        # Diamond shape.
         points = [(gx, gy - r), (gx + r, gy), (gx, gy + r), (gx - r, gy)]
         pygame.draw.polygon(screen, fill_colour, points)
         pygame.draw.polygon(screen, (0, 0, 0), points, 2)
 
-        # Draw health bar above guide
+        # Health bar above the guide.
         bar_w = CELL // 2
         bar_h = 3
         bar_x = gx - bar_w // 2
@@ -301,30 +311,30 @@ while running:
             bar_col = (220, 50, 50)
         pygame.draw.rect(screen, bar_col, (bar_x, bar_y, int(bar_w * health), bar_h))
 
-        # Draw radius circle — different for each policy type
+        # Radius circle, different visual for each policy type.
         if not guide._self_evacuating:
             from evacsim.guide import BeaconGuide
             if isinstance(guide, BeaconGuide):
-                # Beacon: broadcast radius (sound-based, through walls)
+                # Beacon: broadcast radius (sound, passes through walls).
                 brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
                 broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
                 pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
                 screen.blit(broadcast_surf, (gx - brad, gy - brad))
             else:
-                # Sweeper/Router: visual recruit radius (Jin 1978, smaller, LOS)
+                # Sweeper or Router: visual recruit radius (smaller, requires LOS).
                 vrad = int(guide.get_visual_recruit_radius(smoke_system) * SCALE)
                 recruit_surf = pygame.Surface((vrad * 2, vrad * 2), pygame.SRCALPHA)
                 pygame.draw.circle(recruit_surf, (100, 200, 255, 25), (vrad, vrad), vrad)
                 screen.blit(recruit_surf, (gx - vrad, gy - vrad))
 
-    # Advance animation
+    # Advance GIF animation frames.
     frame_timer += 1
     if frame_timer >= FRAME_DELAY:
         frame_timer = 0
         fire_frame_idx = (fire_frame_idx + 1) % len(fire_frames)
         smoke_frame_idx = (smoke_frame_idx + 1) % len(smoke_frames)
 
-    # HUD
+    # HUD: tick counter, speed multiplier, and per-state counts.
     smoke_cells = int((smoke_grid > 0.02).sum())
     fire_cells = int((fire_grid > 0.1).sum())
     idle = sum(1 for c in civilians if c.state == IDLE)

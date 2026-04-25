@@ -16,34 +16,35 @@ class SimConfig:
 
     # Guides
     guide_policy: str = "beacon"  # "none", "beacon", "sweeper", "router"
-    n_guides: int = 4  # Fixed at 4 for fair comparison across maps
+    n_guides: int = 4  # Fixed at 4 for fair comparison across maps.
     guide_speed: float = 2.0
 
-    # Smoke/Fire
+    # Smoke and fire spread coefficients (per-tick CA spread rates).
     smoke_spread_rate: float = 0.02
     fire_spread_rate: float = 0.005
 
-    # Simulation limits
-    max_ticks: int = 6000  # Safety cap chosen from measure_saturation.py probe:
-    # worst-case smoke damage coverage ~4,500 ticks,
-    # plus civilian death time (~300 ticks at damage
-    # threshold), plus ~1,200-tick safety buffer.
-    # In practice, simulations terminate via `all_done`
+    # Simulation limits.
+    max_ticks: int = 6000  # Safety cap chosen from measure_saturation.py
+    # probe: worst-case smoke-damage coverage about
+    # 4,500 ticks, plus civilian death time (around
+    # 300 ticks at the damage threshold), plus a
+    # 1,200-tick safety buffer. Simulations almost
+    # always terminate via the all-resolved check
     # well before this cap.
     seed: int = 42
 
-    # Exit throughput (max civilians escaping per exit per tick)
+    # Exit throughput: maximum civilians escaping per exit per tick.
     exit_throughput: int = 2
 
 
-# --- Visual mode settings (used by test_map_visual.py only) ---
-# These are NOT read by experiments/runner.py or the debug tests - those
-# construct SimConfig objects directly. The VISUAL_ prefix makes the scope
-# unambiguous so nobody expects edits here to affect the full experiment.
+# Visual-mode settings used by test_map_visual.py only. These are not
+# read by experiments/runner.py or the debug tests, which construct
+# SimConfig objects directly. The VISUAL_ prefix marks the scope so
+# changes here do not affect the headless experiment.
 
 VISUAL_CIVILIAN_NUMBER = 100
 VISUAL_GUIDE_POLICY = "none"
 VISUAL_GUIDES_ENABLED = True
-VISUAL_GUIDE_COUNT = None  # default one guide per exit (4)
+VISUAL_GUIDE_COUNT = None  # Default: one guide per exit (typically 4).
 VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",
 # "bottom_left", "bottom_right"

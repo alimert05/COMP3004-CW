@@ -1,5 +1,8 @@
-"""
-Headless simulation engine — no Pygame, pure computation.
+"""Headless simulation engine.
+
+A pure-computation runner with no Pygame dependency. The visual mode
+in test_map_visual.py reuses the same component classes but drives its
+own loop.
 
 Usage:
     from config import SimConfig
@@ -30,25 +33,27 @@ class Simulation:
     def __init__(self, config: SimConfig):
         self.config = config
 
-        # Build environment
+        # Build the environment from the map file.
         self.env = Environment(config)
 
-        # Build smoke & fire
+        # Build smoke and fire systems with deterministic seeds derived
+        # from the master seed.
         self.smoke = SmokeSystem(self.env, spread_rate=config.smoke_spread_rate,
                                   seed=config.seed)
         self.fire = FireSystem(self.env, spread_rate=config.fire_spread_rate,
                                 seed=config.seed + 1)
-        # Fire–smoke coupling: smoke is continuously sourced from fire cells
-        # (Makmul 2020 source-term CA). Must be set AFTER fire is created.
+        # Fire-and-smoke coupling: smoke is continuously sourced from
+        # fire cells. Must be set after both systems are constructed.
         self.smoke._fire = self.fire
 
-        # Spawn civilians
+        # Spawn civilians with a separate seed offset so that civilian
+        # randomness is independent of smoke and fire randomness.
         self.civilians = spawn_civilians(
             self.env, n=config.n_civilians,
             speed=config.civilian_speed, seed=config.seed + 100
         )
 
-        # Spawn guides (fixed count for fair comparison)
+        # Spawn guides. Count is fixed across policies for fairness.
         n_guides = config.n_guides if config.n_guides is not None else 4
 
         self.guides = []
@@ -69,12 +74,13 @@ class Simulation:
                 speed=config.guide_speed, seed=config.seed + 200,
                 n_civilians=config.n_civilians
             )
-        # "none" → empty list
+        # The "none" policy spawns no guides (empty list).
 
-        # Metrics
+        # Metrics collector.
         self.metrics = MetricsCollector()
 
-        # Track which civilians already had events recorded
+        # Track which civilians have already had each event recorded
+        # so the metric collector receives one event per civilian.
         self._escaped_set = set()
         self._dead_set = set()
         self._started_set = set()
@@ -82,70 +88,72 @@ class Simulation:
         self.tick = 0
 
     def step(self) -> bool:
-        """Run one simulation tick. Returns True if simulation should continue."""
+        """Run one simulation tick. Return True if the run should continue."""
         self.tick += 1
 
-        # 1. Spread smoke and fire
+        # 1. Advance the cellular automata one tick.
         self.smoke.step()
         self.fire.step()
 
-        # 2. Update guides
+        # 2. Update guides.
         for guide in self.guides:
             guide.update(self.env, self.smoke, self.fire, self.civilians)
 
-        # 3. Update civilians
+        # 3. Update civilians.
         for civ in self.civilians:
             civ.update(self.env, self.smoke, self.fire, self.civilians)
 
-        # 4. Exit processing — throughput-limited queue
+        # 4. Process exit queues with throughput limiting.
         self._process_exit_queues()
 
-        # 5. Record metrics events
+        # 5. Record metric events (one per civilian for each event type).
         for i, civ in enumerate(self.civilians):
-            # Track when civilians start moving
+            # Mark when each civilian leaves the IDLE/REACTING phase.
             if i not in self._started_set and civ.state not in (IDLE, REACTING):
                 self._started_set.add(i)
                 self.metrics.record_start(i, self.tick)
 
-            # Track escapes
+            # Record escapes.
             if civ.state == ESCAPED and i not in self._escaped_set:
                 self._escaped_set.add(i)
                 self.metrics.record_escape(i, self.tick, civ.potency)
 
-            # Track deaths
+            # Record deaths.
             if civ.state == DEAD and i not in self._dead_set:
                 self._dead_set.add(i)
                 self.metrics.record_death(i, self.tick)
 
-        # 6. Check termination
+        # 6. Termination check: every civilian resolved OR cap reached.
         all_done = all(c.state in (ESCAPED, DEAD) for c in self.civilians)
         max_reached = self.tick >= self.config.max_ticks
 
         return not (all_done or max_reached)
 
     def _process_exit_queues(self):
-        """Process exit queues with throughput limit.
+        """Process exit queues with a per-exit per-tick throughput limit.
 
-        Each exit can only let exit_throughput civilians through per tick.
-        Civilians closest to the exit go first. Others wait (QUEUED state).
-        Waiting civilians still take potency damage — they can die in line."""
+        Each exit lets at most exit_throughput civilians through per
+        tick; the closest civilians go first. Civilians beyond that
+        cap stay in QUEUED and try again next tick. Queued civilians
+        still take potency damage and can die in line.
+        """
         import numpy as np
 
         throughput = self.config.exit_throughput
 
-        # Group queued civilians by their target exit
-        exit_queues = {}  # (ex, ey) → list of (distance, civ_index)
+        # Group queued civilians by their target exit.
+        exit_queues = {}  # (ex, ey) -> list of (distance, civ_index)
         for i, civ in enumerate(self.civilians):
             if civ.state != QUEUED:
                 continue
             if civ._target_exit is None:
-                # No target exit — just escape
+                # No target recorded; let them escape directly.
                 civ.state = ESCAPED
                 civ.escape_tick = self.tick
                 continue
 
             tx, ty = civ._target_exit
-            # Find which exit cell they're at
+            # Identify which exit cell this civilian is closest to.
             best_exit = None
             best_d = float("inf")
             for ex, ey in self.env.exits:
@@ -159,20 +167,19 @@ class Simulation:
                     exit_queues[best_exit] = []
                 exit_queues[best_exit].append((best_d, i))
 
-        # For each exit, let only N closest through
+        # For each exit, let only the throughput nearest civilians
+        # through.
         for exit_pos, queue in exit_queues.items():
-            # Sort by distance (closest first)
             queue.sort(key=lambda x: x[0])
 
             for rank, (dist, civ_idx) in enumerate(queue):
                 if rank < throughput:
-                    # This civilian escapes this tick
                     self.civilians[civ_idx].state = ESCAPED
                     self.civilians[civ_idx].escape_tick = self.tick
-                # Others stay QUEUED — will try again next tick
+                # Otherwise the civilian stays QUEUED until next tick.
 
     def run(self) -> dict:
-        """Run simulation to completion. Returns metrics dict."""
+        """Run the simulation to completion. Return the summary metrics dict."""
         while self.step():
             pass
 
@@ -181,22 +188,24 @@ class Simulation:
             final_tick=self.tick
         )
 
-        # Add config info to result
+        # Add configuration metadata to the result row.
         result["map"] = self.config.map_file
         result["fire_position"] = self.config.fire_position
         result["policy"] = self.config.guide_policy
         result["n_civilians"] = self.config.n_civilians
         result["seed"] = self.config.seed
         result["n_guides"] = len(self.guides)
-        # "Survived" = didn't die in fire (either still alive OR safely escaped)
+        # 'Survived' here means did not die: either still alive on the
+        # patrol or successfully self-evacuated through an exit.
         result["guides_survived"] = sum(
             1 for g in self.guides if g.alive or getattr(g, "escaped", False)
         )
 
-        # Escape-tick bins for evacuation curves (12 bins × 500 ticks each,
-        # covering 0-6000 tick range). Each bin holds the count of civilians
-        # who escaped in that time window. Used in analysis to compute
-        # cumulative "% escaped over time" curves per policy.
+        # Escape-tick bins for evacuation curves: 12 bins of 500 ticks
+        # each covering the 0 to 6000 range. Each bin holds the count
+        # of civilians who escaped during that window. The analysis
+        # script uses these to build cumulative escape curves per
+        # policy.
         bin_edges = [0, 500, 1000, 1500, 2000, 2500, 3000,
                      3500, 4000, 4500, 5000, 5500, 6000]
         escape_ticks = [
@@ -210,5 +219,5 @@ class Simulation:
 
 
 def run_single(config: SimConfig) -> dict:
-    """Convenience function for multiprocessing."""
+    """Convenience wrapper used by the multiprocessing runner."""
     return Simulation(config).run()

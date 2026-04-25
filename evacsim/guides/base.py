@@ -6,10 +6,8 @@ Subclasses (BeaconGuide, SweeperGuide, RouterGuide) override update()
 to implement policy-specific behaviour but call super().update() first
 so damage and health checks remain centralised.
 """
-import math
 import numpy as np
-from collections import deque
-from evacsim.environment import Environment, CellType
+from evacsim.environment import Environment
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
 from evacsim.guides.common import bfs_path

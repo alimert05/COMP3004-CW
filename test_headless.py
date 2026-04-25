@@ -1,4 +1,10 @@
-"""Quick test of headless simulation engine."""
+"""Quick test of the headless simulation engine.
+
+Runs each of the four guide policies once on bottleneck_A with 50
+civilians and a centre fire, then prints the four primary metrics for
+each. Useful for a fast sanity check that all four code paths run end
+to end.
+"""
 
 from config import SimConfig
 from evacsim.simulation import Simulation
@@ -7,7 +13,7 @@ import time
 policies = ["none", "beacon", "sweeper", "router"]
 
 print("=" * 70)
-print("HEADLESS SIMULATION TEST — Map A, 50 civilians, center fire")
+print("HEADLESS SIMULATION TEST: Map A, 50 civilians, centre fire")
 print("=" * 70)
 
 for policy in policies:

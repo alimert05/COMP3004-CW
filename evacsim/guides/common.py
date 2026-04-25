@@ -11,12 +11,9 @@ These primitives are stateless and pure: each call takes its inputs and
 returns a result without mutating any global state. They are imported by
 several guide policies and by the civilian module.
 """
-import math
 import numpy as np
 from collections import deque
 from evacsim.environment import Environment, CellType
-from evacsim.smoke import SmokeSystem
-from evacsim.fire import FireSystem
 
 
 def bfs_path(env: Environment, start_world, goal_world, fire_grid=None):

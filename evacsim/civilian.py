@@ -1,21 +1,22 @@
-"""
-Civilian agent — paper-grounded 5-rule model.
+"""Civilian agent: a 5-rule reactive model with a finite-state machine.
 
-Academic basis:
-  - Potency system: Kasereka et al. 2018 (energy 50-100, decreases in smoke/fire, no recovery)
-  - Reaction delay: Proulx 2001 (pre-evacuation time 0.5-2s)
-  - Random walk: Standard ABM approach (Senanayake et al. 2024 review)
-  - Disorientation in smoke: Smart Cities MDPI 2024 (random direction change proportional to density)
-  - Herding: Helbing et al. 2000 (follow average crowd direction, not individual)
-  - Speed in smoke: Jin 1978 (visibility vs walking speed)
-  - BFS pathfinding: Dijkstra variant (Kasereka 2018)
+The agent's behaviour follows five rules that drive its state transitions
+and movement choices:
 
-5 Rules:
-  1. No target → random walk (pick cardinal direction, walk until wall)
-  2. Has target → follow BFS path (push through smoke)
-  3. In smoke → disorientation (random direction change, probability ∝ density)
-  4. Nearby civilians moving → herding (bias toward average crowd direction)
-  5. Potency ≤ 0 → dead
+    1. No target: random walk along a cardinal direction until a wall
+       is reached, then turn.
+    2. Has target: follow a pre-computed BFS path to a doorway or exit.
+    3. In smoke: random direction change with probability proportional
+       to local smoke density (disorientation).
+    4. Other civilians moving nearby: bias toward their average
+       direction (herding).
+    5. Potency reaches zero: the agent dies.
+
+The finite-state machine has ten reachable states (IDLE, REACTING,
+FLEEING_ROOM, WANDERING, WALL_FOLLOWING, FOLLOWING, FOLLOWING_GUIDE,
+MOVING_TO_EXIT, QUEUED) plus two terminal states (ESCAPED, DEAD).
+Damage from fire and smoke is applied every tick and the agent dies
+when its potency reaches zero.
 """
 
 import numpy as np
@@ -25,16 +26,16 @@ from evacsim.fire import FireSystem
 from evacsim.guide import bfs_path
 
 
-# ── States (simplified) ─────────────────────────────────────────────
-IDLE = 0            # At desk, unaware
-REACTING = 1        # Noticed danger, frozen (reaction delay)
-FLEEING_ROOM = 2    # Following BFS path to corridor doorway
-WANDERING = 3       # Random walk, no goal
-WALL_FOLLOWING = 4  # Blind in smoke, hand-on-wall
-FOLLOWING = 5       # Herding — biased toward crowd direction
-FOLLOWING_GUIDE = 6 # In sweeper's group, using boids to follow
-MOVING_TO_EXIT = 7  # Following BFS path to exit
-QUEUED = 8          # At exit, waiting in line to escape
+# -- States --
+IDLE = 0            # Pre-evacuation: at desk, unaware of the emergency.
+REACTING = 1        # Emergency noticed; frozen during the reaction delay.
+FLEEING_ROOM = 2    # Following a BFS path to a corridor doorway.
+WANDERING = 3       # Random walk with no goal.
+WALL_FOLLOWING = 4  # Blind in smoke; hand-on-wall navigation.
+FOLLOWING = 5       # Herding: biased toward a leader or a crowd direction.
+FOLLOWING_GUIDE = 6 # In a guide's group; uses hybrid BFS plus boids.
+MOVING_TO_EXIT = 7  # Following a BFS path to a known exit.
+QUEUED = 8          # At the exit, waiting in line to escape.
 ESCAPED = 9
 DEAD = 10
 
@@ -48,59 +49,60 @@ class Civilian:
         self.speed = speed
         self._rng = rng
 
-        # Two vision ranges (Jin 1978, Clark et al. 1985):
-        # People: large moving objects, easy to spot (Jin — reflecting objects)
-        # Exits: small static signs, easy to miss in panic (Clark — exit sign visibility)
-        self.people_vision_radius = 70.0  # 7 cells (~20m) — see people in clear air
-        self.exit_vision_radius = 25.0    # 2.5 cells (~7.5m) — see exit signs in clear air
+        # Two vision ranges. People are large moving objects (easier to
+        # spot); exits are static signs (smaller, easier to miss).
+        self.people_vision_radius = 70.0  # 7 cells, about 20 m in clear air.
+        self.exit_vision_radius = 25.0    # 2.5 cells, about 7.5 m in clear air.
 
         self.state = IDLE
 
-        # Escape tracking: tick at which this civilian transitions to ESCAPED.
-        # Remains None if the civilian never escapes (died or still in building).
-        # Used for evacuation-curve analysis (cumulative escape rate over time).
+        # Tick at which this civilian transitions to ESCAPED. Stays
+        # None if the civilian never escapes (died or still in
+        # building). Used by the evacuation-curve analysis to compute
+        # the cumulative escape rate over time.
         self.escape_tick = None
 
-        # Reaction delay: 0.5-2s at 30fps (Proulx 2001)
+        # Reaction delay: 0.5 to 2 seconds at 30 fps.
         self._reaction_delay = int(rng.uniform(15, 60))
         self._reaction_counter = 0
 
-        # Potency: energy/health system (Kasereka 2018)
-        # Random 50-100. Decreases in smoke/fire. NO recovery. At 0 = dead.
+        # Potency: energy and health. Initial value drawn uniformly
+        # in [50, 100]. Decreases in fire and smoke; no recovery.
+        # When it reaches zero the agent dies.
         self.potency = rng.uniform(50.0, 100.0)
 
-        # Herding commitment: once following a crowd, commit for N ticks
+        # Herding state: once following a crowd, commit for N ticks.
         self._herding_commitment = 0
-        self._herding_leader = None  # Specific civilian we're following
+        self._herding_leader = None  # Specific civilian being followed.
 
-        # BFS waypoints + target
+        # BFS waypoints and target.
         self._waypoints = []
         self._target_exit = None
 
-        # Random walk: current direction (cardinal)
+        # Random-walk direction (cardinal).
         self._walk_dir = None
 
-        # Exit told by guide (set before reaction finishes, used after)
+        # Exit told by a guide before the reaction finishes; consumed
+        # at the moment the agent starts moving.
         self._guide_told_exit = None
 
-        # Wall-following hand rule
+        # Wall-following hand rule (random left or right at spawn).
         self._wall_hand = 1 if rng.random() < 0.5 else -1
 
-        # Stuck detection
+        # Stuck detection.
         self._prev_pos = self.pos.copy()
         self._stuck_ticks = 0
 
-        # For sweeper guide (Phase 2)
+        # State for following a guide via the hybrid BFS-plus-boids loop.
         self.assigned_guide = None
-        self._boids_bfs_cache = []  # Cached BFS path for boids wall fallback
-        self._boids_bfs_tick = 0    # When cache was last updated
-        self._cached_guide_pos = None  # Guide position when cache was built
-                                       # (used for distance-based invalidation
-                                       # — see D1 fix in _hybrid_boids_follow)
+        self._boids_bfs_cache = []     # Cached BFS path to the guide.
+        self._boids_bfs_tick = 0       # Tick when the cache was last refreshed.
+        self._cached_guide_pos = None  # Guide position at cache build, used
+                                       # for distance-based invalidation.
 
-    # ================================================================
-    # MAIN UPDATE
-    # ================================================================
+    # ----------------------------------------------------------------
+    # Main update
+    # ----------------------------------------------------------------
 
     def update(self, env: Environment, smoke: SmokeSystem,
                fire: FireSystem, all_civilians: list) -> None:
@@ -108,9 +110,9 @@ class Civilian:
         if self.state in (ESCAPED, DEAD):
             return
 
-        # Store references for helper methods
+        # Cache references used by helper methods this tick.
         self._env_ref = env
-        # Store fire grid for BFS calls within this tick
+        # Cache the fire grid for BFS calls within this tick.
         self._fire_grid = fire.density
 
         x, y = self.pos
@@ -119,19 +121,16 @@ class Civilian:
         in_smoke = local_smoke > 0.3
         in_fire = local_fire > 0.1
 
-        # ── IDLE: slow ambient movement + wait for danger ──
-        # Pre-evacuation period (Proulx 2001): civilians are not yet
-        # aware of the emergency, so they move at a CASUAL pace without
-        # any destination — modelling normal office activity (walking
-        # between desks/bathroom/colleagues). They do NOT detect exits
-        # (early return below bypasses exit-spotting logic) but they
-        # DO notice fire/smoke/fleeing others through the triggers below,
-        # which is how pre-evacuation transitions happen in real life.
-        # IDLE civilians are also EXCLUDED from being seen as "fleeing"
-        # by others (line ~610 in _see_others_fleeing), so their ambient
-        # movement does not cause cascading false alarms.
+        # IDLE: slow ambient movement plus passive triggers.
+        # The agent is not yet aware of the emergency, moves at a
+        # casual pace without any destination, and is excluded from
+        # exit detection (the early return below bypasses the spotting
+        # logic). Fire, smoke, sensed danger, and sight of others
+        # fleeing are the triggers that move the agent into REACTING.
+        # IDLE agents are also excluded from being seen as 'fleeing'
+        # by others, so their ambient motion does not cause cascading
+        # false alarms.
         if self.state == IDLE:
-            # Alert triggers — same as before
             if (in_fire or in_smoke
                     or self._sense_danger(env, smoke, fire)
                     or self._see_others_fleeing(all_civilians)):
@@ -139,33 +138,32 @@ class Civilian:
                 self._reaction_counter = 0
                 return
 
-            # Ambient movement: slow casual pace (0.3× normal speed).
-            # Much slower than evacuating civilians (1.5 unit/tick) so the
-            # visual distinction remains clear and so IDLE civilians do not
-            # accidentally reach an exit cell before realising the danger.
+            # Ambient movement at 30 percent of normal speed. Slower
+            # than evacuation pace so the visual distinction is clear
+            # and so an IDLE agent does not accidentally reach an exit
+            # cell before noticing the emergency.
             idle_speed = self.speed * 0.3
 
-            # Occasional direction change — natural-looking ambient motion.
-            # 2% chance per tick ≈ change direction every ~50 ticks.
+            # About a 2 percent chance to change direction per tick,
+            # producing a natural-looking ambient motion of a new
+            # heading every roughly 50 ticks.
             if self._walk_dir is None or self._rng.random() < 0.02:
                 self._pick_random_cardinal()
 
-            # Random walk sets self.vel; _move applies wall collision +
-            # separation from other civilians (reused existing logic).
+            # _do_random_walk sets self.vel; _move applies wall
+            # collision and inter-civilian separation.
             self._do_random_walk(env, idle_speed, local_smoke)
             self._move(env, idle_speed, all_civilians)
             return
 
-        # ── Rule 5: Potency damage (no recovery) ──
-        # Applied BEFORE state-specific logic so that REACTING civilians
-        # still take fire/smoke damage. Fire burns you whether you're
-        # frozen in panic or not (Kasereka 2018).
-        # Fire and smoke damage STACK — both hazards affect the civilian
-        # independently. Using elif would produce the perverse result that
-        # a cell with mild fire + heavy smoke deals less damage than heavy
-        # smoke alone (fire triggers, smoke gets skipped). Additive matches
-        # physical reality: heat exposure and asphyxiation are separate
-        # injury mechanisms.
+        # Rule 5: potency damage with no recovery.
+        # Applied before state-specific logic so that REACTING agents
+        # also take damage. Fire and smoke damage stack: a cell with
+        # mild fire and heavy smoke would otherwise deal less damage
+        # than heavy smoke alone (fire would short-circuit the smoke
+        # branch). Additive damage matches the physical reality that
+        # heat exposure and asphyxiation are separate injury
+        # mechanisms.
         if in_fire:
             self.potency -= 3.0 * local_fire
         if in_smoke:
@@ -176,24 +174,26 @@ class Civilian:
             self.vel = np.zeros(2)
             return
 
-        # ── REACTING: freeze, then move ──
+        # REACTING: freeze for the reaction delay, then start moving.
         if self.state == REACTING:
             self._reaction_counter += 1
             if self._reaction_counter >= self._reaction_delay:
                 self._start_moving(env)
             return
 
-        # ── Vision & speed ──
+        # Vision and speed for this tick.
         people_vision, exit_vision = self._calc_vision(local_smoke)
         speed = self._calc_speed(in_fire, in_smoke)
 
-        # ── Opportunistic: spot exit (uses exit_vision — small signs, easy to miss) ──
-        # FOLLOWING_GUIDE civilians CAN spot exits — if you see an exit door,
-        # you go through it. You don't wait for the guide to announce it.
+        # Opportunistic exit spotting. The exit_vision range is
+        # tighter than people_vision because exit signs are small.
+        # FOLLOWING_GUIDE agents can also spot exits: if the agent
+        # sees an exit door it goes through it rather than waiting
+        # for the guide to announce it.
         if exit_vision > 0 and self.state not in (MOVING_TO_EXIT, QUEUED):
             exit_pos = self._spot_exit(env, exit_vision)
             if exit_pos is not None:
-                # If in a guide's group, leave the group first
+                # If currently in a guide's group, leave the group first.
                 if self.state == FOLLOWING_GUIDE and self.assigned_guide is not None:
                     try:
                         self.assigned_guide._group.remove(self)
@@ -202,16 +202,16 @@ class Civilian:
                     self.assigned_guide = None
                 self._set_exit_target_force(env, exit_pos)
 
-        # ── Rule 4: Herding — follow someone who knows the way ──
+        # Rule 4: herding. Follow someone who looks like they know the way.
         if people_vision > 0 and self.state == WANDERING:
             leader = self._find_goal_leader(all_civilians, people_vision)
             if leader is not None:
-                # Found someone heading to exit — follow them
+                # Found a goal-directed leader; follow them.
                 self._herding_leader = leader
                 self.state = FOLLOWING
                 self._herding_commitment = 20
             else:
-                # No goal-directed person, but check crowd direction as fallback
+                # No leader. Fall back to the average crowd direction.
                 crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
                 if crowd_dir is not None:
                     self._walk_dir = crowd_dir
@@ -219,34 +219,34 @@ class Civilian:
                     self.state = FOLLOWING
                     self._herding_commitment = 20
 
-        # ── State behaviors ──
+        # State behaviours.
 
         if self.state == FLEEING_ROOM:
-            # Rule 2: follow BFS path to doorway
+            # Rule 2: follow the BFS path to a doorway.
             self._do_follow_path(env, speed, fallback=WANDERING)
 
         elif self.state == MOVING_TO_EXIT:
-            # Rule 2: follow BFS path to exit
+            # Rule 2: follow the BFS path to an exit.
             if self._target_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._target_exit))
                 if dist < env.cell_size:
-                    # Don't escape instantly — enter queue
+                    # Do not escape immediately; enter the exit queue.
                     self.state = QUEUED
                     self.vel = np.zeros(2)
                     return
             self._do_follow_path(env, speed, fallback=WANDERING)
 
         elif self.state == QUEUED:
-            # Waiting at exit — simulation engine will process the queue
-            # Still take potency damage while waiting!
+            # Waiting at the exit. The simulation engine processes the
+            # queue. The agent still takes damage while waiting.
             self.vel = np.zeros(2)
 
         elif self.state == FOLLOWING:
             leader = self._herding_leader
 
-            # Following a specific leader vs crowd direction
+            # Following a specific leader vs. a crowd direction.
             if leader is not None:
-                # Leader died, escaped, or we lost line of sight?
+                # Leader died, escaped, or is no longer visible.
                 if leader.state in (ESCAPED, DEAD):
                     leader = None
                     self._herding_leader = None
@@ -257,16 +257,16 @@ class Civilian:
                         self._herding_leader = None
 
             if leader is not None:
-                # Follow the specific leader (direct vector — not boids)
+                # Direct vector toward the leader (not boids).
                 diff = leader.pos - self.pos
                 dist = np.linalg.norm(diff)
                 if dist > 1.0:
                     self.vel = (diff / dist) * speed
             elif self._walk_dir is not None:
-                # Fallback: follow crowd direction
+                # Fallback: follow the crowd direction.
                 self.vel = self._walk_dir * speed
 
-            # Stuck? Give up
+            # Stuck for too long: give up herding.
             if self._stuck_ticks >= 8:
                 self.state = WANDERING
                 self._walk_dir = None
@@ -276,13 +276,13 @@ class Civilian:
                 self._herding_commitment = max(0, self._herding_commitment - 1)
 
                 if self._herding_commitment > 0:
-                    # Still committed — keep following, but check for exits
+                    # Still committed; keep following but check for exits.
                     if exit_vision > 0:
                         exit_pos = self._spot_exit(env, exit_vision)
                         if exit_pos is not None:
                             self._set_exit_target(env, exit_pos)
                 elif people_vision > 0:
-                    # Commitment expired — re-check for leader or crowd
+                    # Commitment expired; recheck for a leader or crowd.
                     new_leader = self._find_goal_leader(all_civilians, people_vision)
                     if new_leader is not None:
                         self._herding_leader = new_leader
@@ -311,12 +311,14 @@ class Civilian:
             else:
                 dist_to_guide = np.linalg.norm(self.pos - guide.pos)
 
-                # Give up following if:
-                # (a) far from guide for too long (lost in corridors), OR
-                # (b) stuck for a long time regardless of distance (pinned
-                #     against a wall next to guide — neither can move).
-                # Without case (b), pinned civilians could stay in
-                # FOLLOWING_GUIDE forever until they die of smoke.
+                # Give up following if either:
+                # (a) far from the guide for too long (lost in
+                #     corridors), or
+                # (b) stuck for a long time regardless of distance,
+                #     for example pinned against a wall next to the
+                #     guide where neither can move. Without case (b)
+                #     a pinned agent could stay in FOLLOWING_GUIDE
+                #     until it dies of smoke.
                 far_and_stuck = (dist_to_guide > env.cell_size * 20
                                  and self._stuck_ticks >= 8)
                 long_stuck = self._stuck_ticks >= 30
@@ -329,14 +331,14 @@ class Civilian:
                     self.state = WANDERING
                     self._walk_dir = None
                 else:
-                    # Hybrid BFS + Boids:
-                    # - BFS gives direction (handles walls, doorways)
-                    # - Boids separation prevents piling up
+                    # Hybrid BFS plus boids:
+                    # BFS gives direction (handles walls, doorways).
+                    # Boids separation prevents piling up.
                     self.vel = self._hybrid_boids_follow(
                         guide, all_civilians, speed, env)
 
         elif self.state == WALL_FOLLOWING:
-            # Blind in smoke: hand-on-wall
+            # Blind in smoke: hand-on-wall.
             self._do_wall_follow(env, speed)
             if people_vision > 10 and not in_smoke:
                 self.state = WANDERING
@@ -344,24 +346,28 @@ class Civilian:
 
         elif self.state == WANDERING:
             if in_smoke and people_vision < 5:
-                # Blind → wall-follow
+                # Effectively blind: switch to wall-following.
                 self.state = WALL_FOLLOWING
                 self._do_wall_follow(env, speed)
             else:
-                # Rule 1: random walk
-                # Rule 3: disorientation in smoke
+                # Rule 1: random walk.
+                # Rule 3: disorientation in smoke.
                 self._do_random_walk(env, speed, local_smoke)
 
-        # ── Apply movement ──
+        # Apply movement.
         self._move(env, speed, all_civilians)
 
-    # ================================================================
-    # STATE TRANSITIONS
-    # ================================================================
+    # ----------------------------------------------------------------
+    # State transitions
+    # ----------------------------------------------------------------
 
     def _start_moving(self, env):
-        """After reaction delay: if guide told us an exit, go there.
-        Otherwise find doorway or start wandering."""
+        """Choose a destination at the end of the reaction delay.
+
+        If a guide pre-assigned an exit, head there. Otherwise look
+        for a doorway out of the current room; if none is reachable
+        within the search radius, fall back to wandering.
+        """
         if self._guide_told_exit is not None:
             self._set_exit_target(env, self._guide_told_exit)
             self._guide_told_exit = None
@@ -377,7 +383,11 @@ class Civilian:
             self._pick_random_cardinal()
 
     def _set_exit_target(self, env, exit_pos):
-        """Set exit as goal with BFS path. Won't override FOLLOWING_GUIDE."""
+        """Set an exit as the goal with a fresh BFS path.
+
+        Does not override FOLLOWING_GUIDE: a guided agent stays with
+        its guide unless the guide releases it.
+        """
         if self.state == FOLLOWING_GUIDE:
             return
         self._target_exit = exit_pos
@@ -386,36 +396,37 @@ class Civilian:
         self.state = MOVING_TO_EXIT
 
     def _set_exit_target_force(self, env, exit_pos):
-        """Force-set exit target (used when guide releases group)."""
+        """Force-set the exit target. Used when a guide releases the group."""
         self._target_exit = exit_pos
         fg = getattr(self, '_fire_grid', None)
         self._waypoints = bfs_path(env, self.pos, np.array(exit_pos), fire_grid=fg)
         self.state = MOVING_TO_EXIT
         self.assigned_guide = None
 
-    # ================================================================
-    # MOVEMENT RULES
-    # ================================================================
+    # ----------------------------------------------------------------
+    # Movement rules
+    # ----------------------------------------------------------------
 
     def _do_random_walk(self, env, speed, smoke_density):
-        """Rule 1 + Rule 3: Random walk with disorientation in smoke.
-        Pick a cardinal direction, walk until wall. In smoke, random
-        chance to change direction (disorientation)."""
+        """Rules 1 and 3: cardinal random walk with smoke-induced disorientation.
 
-        # Rule 3: Disorientation — smoke makes you lose your way
+        Pick a cardinal direction and walk until a wall. In smoke,
+        a random chance to change direction simulates disorientation.
+        """
+        # Rule 3: disorientation.
         if smoke_density > 0.2:
-            # Higher smoke = more chance to randomly change direction
+            # Higher smoke increases the chance of an arbitrary turn.
             if self._rng.random() < smoke_density * 0.3:
                 self._pick_random_cardinal()
 
-        # No direction yet? Pick one
+        # Pick an initial direction if there is none.
         if self._walk_dir is None:
             self._pick_random_cardinal()
 
         self.vel = self._walk_dir * speed
 
     def _do_follow_path(self, env, speed, fallback):
-        """Rule 2: Follow BFS waypoints."""
+        """Rule 2: follow the BFS waypoints. Switch to fallback when exhausted."""
         if not self._waypoints:
             self.state = fallback
             self._walk_dir = None
@@ -439,7 +450,7 @@ class Civilian:
             self.vel = (diff / dist) * speed
 
     def _do_wall_follow(self, env, speed):
-        """Blind in smoke: hand-on-wall rule."""
+        """Hand-on-wall navigation when the agent is effectively blind in smoke."""
         x, y = self.pos
         cs = env.cell_size * 0.5
 
@@ -452,7 +463,7 @@ class Civilian:
                     self.vel = np.array([wall[1], -wall[0]]) * speed
                 return
 
-        # No wall nearby — walk forward
+        # No wall nearby: walk forward in the current direction.
         norm = np.linalg.norm(self.vel)
         if norm > 0:
             self.vel = (self.vel / norm) * speed
@@ -461,28 +472,28 @@ class Civilian:
             self.vel = self._walk_dir * speed
 
     def _hybrid_boids_follow(self, guide, all_civilians, speed, env):
-        """Hybrid BFS + Boids for following a sweeper guide.
+        """Hybrid BFS plus boids steering for following a guide.
 
-        Adapted from Reynolds' boids (1987) for indoor environments:
-          - COHESION: replaced with BFS pathfinding toward guide
-            (handles walls, doorways, corridors automatically)
-          - ALIGNMENT: match guide's movement direction
-          - SEPARATION: push away from nearby group members
-            (prevents piling up at doorways and corridors)
+        Three steering forces are combined:
+            COHESION via BFS: a recomputed BFS path toward the guide
+                handles walls, doorways and corridors automatically.
+            ALIGNMENT: match the guide's current direction.
+            SEPARATION: push away from nearby group members to
+                prevent piling up at doorways and corridors.
 
-        BFS handles navigation. Boids handles group spacing.
+        BFS handles navigation; boids handles group spacing.
         """
-        # ── COHESION via BFS (not direct vector) ──
-        # Recompute path when EITHER trigger fires:
-        #   (a) 8 ticks elapsed since last recompute (time-based fallback)
-        #   (b) guide has moved > 2 cells since cache was built (D1 fix —
-        #       catches sharp turns and sprints that would otherwise leave
-        #       the civilian walking toward the guide's OLD position for
-        #       up to 8 ticks).
-        # NOTE: we intentionally do NOT also recompute when cache is empty —
-        # an empty cache (BFS returned no path) would otherwise cause BFS
-        # to run every single tick, which is O(rows*cols) per civilian per
-        # tick when the guide is unreachable.
+        # Recompute the BFS path on either trigger:
+        # (a) eight ticks elapsed since the last recompute (time-based
+        #     fallback);
+        # (b) the guide has moved more than two cells since the cache
+        #     was built (catches sharp turns and sprints that would
+        #     otherwise leave the agent walking toward the guide's
+        #     stale position for up to eight ticks).
+        # Intentionally not recomputing on an empty cache: an empty
+        # cache (BFS returned no path) would cause BFS to run every
+        # single tick, which is O(rows * cols) per civilian per tick
+        # when the guide is unreachable.
         self._boids_bfs_tick += 1
         guide_moved = 0.0
         if self._cached_guide_pos is not None:
@@ -493,7 +504,7 @@ class Civilian:
             fg = getattr(self, '_fire_grid', None)
             self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)
 
-        # Follow BFS waypoints
+        # Follow the cached BFS waypoints.
         cohesion_dir = np.zeros(2)
         if self._boids_bfs_cache:
             target = self._boids_bfs_cache[0]
@@ -508,17 +519,17 @@ class Civilian:
             if d > 0:
                 cohesion_dir = diff / d
         else:
-            # No path — direct vector as fallback
+            # No path: fall back to a direct vector toward the guide.
             diff = guide.pos - self.pos
             d = np.linalg.norm(diff)
             if d > 0:
                 cohesion_dir = diff / d
 
-        # ── ALIGNMENT: match guide's direction ──
+        # Alignment: match the guide's direction.
         gv = np.linalg.norm(guide.vel)
         alignment_dir = guide.vel / gv if gv > 0.1 else np.zeros(2)
 
-        # ── SEPARATION: push away from nearby group members ──
+        # Separation: push away from nearby group members.
         separation_dir = np.zeros(2)
         sep_r = env.cell_size * 1.5
         sep_count = 0
@@ -535,8 +546,9 @@ class Civilian:
         if sep_count > 0:
             separation_dir /= sep_count
 
-        # ── Combine (weights from lecture: alignment*1, cohesion*0.1, separation*2)
-        # Adjusted for leader-following: cohesion strongest (follow the guide)
+        # Combine the three forces. Cohesion is strongest because the
+        # primary task is to follow the guide; separation prevents
+        # piling up; alignment provides a smoother trajectory.
         steer = cohesion_dir * 1.0 + alignment_dir * 0.5 + separation_dir * 1.5
 
         norm = np.linalg.norm(steer)
@@ -548,23 +560,23 @@ class Civilian:
         return steer
 
     def _move(self, env, speed, all_civilians=None):
-        """Apply velocity with wall collision + universal separation.
+        """Apply velocity, with wall collision and universal separation.
 
-        Universal separation (Reynolds 1987) applies to ALL civilians
-        regardless of state. Prevents overlapping, creates natural
-        queueing at exits and doorways."""
+        Universal separation applies to every civilian regardless of
+        state. It prevents agents from overlapping and produces
+        natural queueing at exits and doorways.
+        """
         x, y = self.pos
 
-        # ── Universal separation: push away from nearby civilians ──
-        # Quick distance check first (manhattan) to skip far civilians early
+        # Universal separation: push away from nearby civilians.
+        # Manhattan pre-filter avoids the per-pair sqrt for distant ones.
         if all_civilians is not None:
             sep_force = np.zeros(2)
-            sep_r = env.cell_size * 2.0  # 2 cells radius
+            sep_r = env.cell_size * 2.0  # Two-cell radius.
             px, py = self.pos[0], self.pos[1]
             for other in all_civilians:
                 if other is self or other.state in (ESCAPED, DEAD):
                     continue
-                # Fast manhattan pre-filter (avoids sqrt for distant civilians)
                 dx = px - other.pos[0]
                 dy = py - other.pos[1]
                 if abs(dx) > sep_r or abs(dy) > sep_r:
@@ -576,8 +588,8 @@ class Civilian:
                     sep_force[1] += (dy / dn) * strength
             self.vel = self.vel + sep_force * speed * 0.4
 
-        # Clamp velocity magnitude to prevent separation force pushing
-        # civilians through thin walls (Reynolds 1987 — max speed limit)
+        # Clamp the velocity magnitude so the separation force cannot
+        # push agents through thin walls.
         vmag = np.linalg.norm(self.vel)
         max_vel = speed * 2.0
         if vmag > max_vel:
@@ -594,7 +606,7 @@ class Civilian:
         else:
             self._pick_random_cardinal()
 
-        # Stuck detection
+        # Stuck detection.
         moved = np.linalg.norm(self.pos - self._prev_pos)
         if moved < 0.5:
             self._stuck_ticks += 1
@@ -607,7 +619,7 @@ class Civilian:
             self._stuck_ticks = 0
 
     def _pick_random_cardinal(self):
-        """Pick a random cardinal direction (up/down/left/right)."""
+        """Pick a random cardinal direction (up, down, left, or right)."""
         dirs = [
             np.array([1.0, 0.0]),
             np.array([-1.0, 0.0]),
@@ -616,28 +628,31 @@ class Civilian:
         ]
         self._walk_dir = dirs[self._rng.integers(4)]
 
-    # ================================================================
-    # PERCEPTION
-    # ================================================================
+    # ----------------------------------------------------------------
+    # Perception
+    # ----------------------------------------------------------------
 
     def _calc_vision(self, smoke_density):
-        """Calculate two vision ranges (Jin 1978, Clark et al. 1985).
-        Returns (people_vision, exit_vision).
-        Civilians: eyes unprotected, smoke causes irritation + tearing.
-        Vision drops rapidly with smoke density."""
+        """Return (people_vision, exit_vision) attenuated by smoke.
+
+        Civilians have unprotected eyes, so smoke causes irritation
+        and tearing and vision drops rapidly with smoke density.
+        """
         smoke_factor = max(0.15, 1.0 - smoke_density)
         people_v = self.people_vision_radius * smoke_factor
         exit_v = self.exit_vision_radius * smoke_factor
         return people_v, exit_v
 
     def _calc_speed(self, in_fire, in_smoke):
+        """Return the per-tick movement speed for the current conditions."""
         has_path = self.state in (FLEEING_ROOM, MOVING_TO_EXIT, FOLLOWING)
         following_guide = self.state == FOLLOWING_GUIDE
         if in_fire:
             return self.speed * 1.8
         elif in_smoke:
             if following_guide:
-                # Guide is leading — motivated, move at 85% speed even in smoke
+                # Guide is leading: the agent is motivated and moves
+                # at 85 percent of base speed even in smoke.
                 return self.speed * 0.85
             elif has_path:
                 return self.speed * 0.7
@@ -646,9 +661,12 @@ class Civilian:
         return self.speed
 
     def _see_others_fleeing(self, all_civilians):
-        """Kasereka 2018: 'when they see a person who evacuates the place,
-        they shall run towards the nearest exit door.'
-        Must have line of sight — can't see through walls."""
+        """Return True if a fleeing civilian is visible nearby.
+
+        Captures the alert-by-imitation effect: if someone nearby is
+        evacuating, the agent infers there is danger and starts to
+        react. Requires line of sight; walls block the cue.
+        """
         env = getattr(self, '_env_ref', None)
         for other in all_civilians:
             if other is self:
@@ -660,13 +678,16 @@ class Civilian:
                 if env is not None and self._has_los(other.pos, env):
                     return True
                 elif env is None:
-                    return True  # Fallback if env not set yet
+                    return True  # Fallback before env is cached.
         return False
 
     def _find_goal_leader(self, all_civilians, radius):
-        """Find nearest VISIBLE civilian who has a goal (MOVING_TO_EXIT or FLEEING_ROOM).
-        These are people who look like they know where they're going.
-        In real life: you follow the confident person, not the panicking crowd."""
+        """Return the nearest visible goal-directed civilian.
+
+        A goal-directed civilian is one in MOVING_TO_EXIT or
+        FLEEING_ROOM, the states that look 'confident'. People follow
+        the confident person rather than the panicking crowd.
+        """
         env = getattr(self, '_env_ref', None)
         best, best_d = None, float("inf")
         for other in all_civilians:
@@ -681,7 +702,7 @@ class Civilian:
         return best
 
     def _sense_danger(self, env, smoke, fire):
-        """Detect smoke/fire within 1 cell."""
+        """Return True if smoke or fire is detectable within one cell."""
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = smoke.density.shape
         for dr in range(-1, 2):
@@ -693,7 +714,7 @@ class Civilian:
         return False
 
     def _has_los(self, target_pos, env):
-        """Line of sight check — can we see the target without walls blocking?"""
+        """Line-of-sight raycast. Returns False if a wall blocks the line."""
         diff = target_pos - self.pos
         dist = np.linalg.norm(diff)
         if dist < env.cell_size:
@@ -708,7 +729,7 @@ class Civilian:
         return True
 
     def _spot_exit(self, env, eff_vision):
-        """Find nearest exit within vision AND line of sight."""
+        """Return the nearest exit within vision range and line of sight."""
         best, best_d = None, float("inf")
         for ex, ey in env.exits:
             d = np.hypot(self.pos[0] - ex, self.pos[1] - ey)
@@ -718,8 +739,11 @@ class Civilian:
         return best
 
     def _sense_crowd_direction(self, all_civilians, radius):
-        """Rule 4: Herding — average direction of nearby VISIBLE moving civilians.
-        Requires line of sight — can't see through walls (Helbing 2000)."""
+        """Rule 4: average direction of nearby visible moving civilians.
+
+        Requires line of sight; walls block the cue. Returns None if
+        there are fewer than two qualifying neighbours.
+        """
         avg_dir = np.zeros(2)
         count = 0
 
@@ -730,7 +754,6 @@ class Civilian:
             if d < radius and d > 0:
                 other_speed = np.linalg.norm(other.vel)
                 if other_speed > 0.5:
-                    # Must have line of sight — can't see through walls
                     if self._has_los(other.pos, self._env_ref):
                         avg_dir += other.vel / other_speed
                         count += 1
@@ -741,12 +764,16 @@ class Civilian:
                 return avg_dir / norm
         return None
 
-    # ================================================================
-    # PATHFINDING
-    # ================================================================
+    # ----------------------------------------------------------------
+    # Pathfinding
+    # ----------------------------------------------------------------
 
     def _find_doorway(self, env):
-        """BFS to nearest corridor cell (6+ straight-line walk)."""
+        """BFS for the nearest cell that opens onto a corridor.
+
+        A corridor cell is one with at least a six-cell straight run
+        in some cardinal direction. Searches up to 25 cells.
+        """
         from collections import deque
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = env.grid.shape
@@ -783,13 +810,13 @@ class Civilian:
         return None
 
 
-# ════════════════════════════════════════════════════════════════════
-# SPAWNING
-# ════════════════════════════════════════════════════════════════════
+# --------------------------------------------------------------------
+# Spawning
+# --------------------------------------------------------------------
 
 def spawn_civilians(env: Environment, n: int, speed: float = 1.5,
                     seed: int = 99) -> list[Civilian]:
-    """Create n civilians at random floor positions."""
+    """Create n civilians at room-clustered floor positions."""
     positions = env.spawn_positions(n, seed=seed)
     rng = np.random.default_rng(seed)
     return [Civilian(x, y, speed, rng) for x, y in positions]
