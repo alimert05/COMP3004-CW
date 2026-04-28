@@ -28,7 +28,7 @@ Academic year 2025/2026
 
 ## 3. Requirements
 
-- Python 3.10 or newer (developed on 3.13.2)
+- Python 3.10 or newer (developed on 3.14.3)
 - Packages listed in `requirements.txt`
 
 Install with:
@@ -229,14 +229,7 @@ COMP3004-CW/
 └── results/                   Experiment output (CSV + analysis)
 ```
 
-## 14. Related documents
-
-- **Main report**: `Agents_Report.pdf` (submitted separately via Moodle)
-- **Supplementary PDFs**: `agent_specs.pdf`, `statistics.pdf` (submitted as a supplementary zip)
-- **Video demonstration**: `video_COMP3004_20587851.mp4`
-  (submitted separately)
-
-## 15. Platform notes
+## 14. Platform notes
 
 - **Windows**: multiprocessing in `experiments/runner.py` is already
   guarded with `if __name__ == "__main__":`. No extra action needed.
