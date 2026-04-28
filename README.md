@@ -10,7 +10,23 @@ Ali Karaoglu (20587851)
 COMP3004 Designing Intelligent Agents — University of Nottingham
 Academic year 2025/2026
 
-## 2. Requirements
+## 2. Policies at a glance
+
+- **Beacon** — passive broadcaster. Stands two cells inward from an
+  assigned exit and announces the exit to every civilian within
+  hearing range. Hearing probability decays with distance and with
+  smoke at both endpoints.
+- **Sweeper** — reactive patroller. Walks an assigned territory in
+  alternating-half order, recruits civilians visually within
+  line-of-sight, and escorts them to the nearest safe exit using
+  a three-layer Dijkstra → safety-validator → BFS path cascade.
+- **Router** — hybrid reactive-deliberative. Globally scans for
+  civilian clusters via DBSCAN, predicts fire and smoke spread 30
+  ticks ahead, routes through density-weighted Dijkstra paths, and
+  re-evaluates the destination exit every 20 ticks under a
+  multi-criteria score (distance, congestion, smoke, fire).
+
+## 3. Requirements
 
 - Python 3.10 or newer (developed on 3.13.2)
 - Packages listed in `requirements.txt`
@@ -21,7 +37,7 @@ Install with:
 pip install -r requirements.txt
 ```
 
-## 3. Smoke test
+## 4. Smoke test
 
 Verify the full pipeline works end-to-end with a 4-run sanity check
 (approximately 45 seconds on a modern 8-core machine):
@@ -33,7 +49,7 @@ python -m experiments.runner --smoke
 This runs one simulation per policy on `bottleneck_A` at crowd size 100,
 streams results to `results/experiment_results.csv`, and exits.
 
-## 4. Visual demo
+## 5. Visual demo
 
 Run the simulation with a Pygame window showing civilians, guides, fire,
 and smoke in real time:
@@ -47,7 +63,7 @@ of `config.py`. Change `VISUAL_GUIDE_POLICY` to `"none"`, `"beacon"`,
 `"sweeper"`, or `"router"` to see different policies, and
 `VISUAL_CIVILIAN_NUMBER` to vary crowd size.
 
-## 5. Reproducing the experiment
+## 6. Reproducing the experiment
 
 The full factorial (8 maps × 5 fire positions × 4 policies × 3 crowd sizes
 × 30 trials = 14,400 runs):
@@ -71,7 +87,7 @@ Alternative modes:
 
 Worker count defaults to 8; override with `--workers N`.
 
-## 6. Performance notes
+## 7. Performance notes
 
 Approximate wall-clock times on an 8-core machine:
 
@@ -85,11 +101,22 @@ Per-run CPU cost scales with policy complexity and crowd size; Router at
 n = 150 civilians is the slowest configuration. Disk output for the full
 run is approximately 2 MB.
 
-Seeds are deterministic via `zlib.crc32(trial_index)`, so re-running the
-full experiment produces identical numbers across sessions, machines, and
-Python versions.
+## 8. Reproducibility
 
-## 7. Reproducing the analysis
+The 14,400-run dataset in `results/experiment_results.csv` is fully
+reproducible:
+
+- Seeds are derived deterministically from the trial index via
+  `zlib.crc32`, which is stable across processes, Python versions,
+  and operating systems.
+- A re-run of `python -m experiments.runner` produces the same numbers
+  byte for byte.
+- The seed scheme is fully paired across factorial conditions: trial N
+  represents the same civilian cohort under every (map, fire, policy,
+  crowd) combination, so within-cell and across-cell comparisons are
+  matched on stochastic noise.
+
+## 9. Reproducing the analysis
 
 After `results/experiment_results.csv` exists, generate all statistical
 tables and figures:
@@ -110,7 +137,42 @@ The analysis produces:
 - Box plots, line charts, policy × map heatmap
 - Per-policy summary CSVs
 
-## 8. Output format
+## 10. Configuration
+
+Key `SimConfig` fields (in `config.py`):
+
+| Field               | Default                       | Purpose                                                            |
+|---------------------|-------------------------------|--------------------------------------------------------------------|
+| `map_file`          | `"maps/bottleneck_A.txt"`     | Map file path                                                      |
+| `cell_size`         | `10.0`                        | World units per grid cell (≈ 3 m)                                  |
+| `fire_position`     | `"center"`                    | One of `center`, `top_left`, `top_right`, `bottom_left`, `bottom_right` |
+| `n_civilians`       | `50`                          | Number of civilians spawned                                        |
+| `civilian_speed`    | `1.5`                         | Civilian movement, world units per tick                            |
+| `guide_policy`      | `"beacon"`                    | One of `none`, `beacon`, `sweeper`, `router`                       |
+| `n_guides`          | `4`                           | Number of guides spawned                                           |
+| `guide_speed`       | `2.0`                         | Guide movement, world units per tick                               |
+| `smoke_spread_rate` | `0.02`                        | Per-tick spread coefficient for the smoke CA                       |
+| `fire_spread_rate`  | `0.005`                       | Per-tick spread coefficient for the fire CA                        |
+| `max_ticks`         | `6000`                        | Hard simulation cap                                                |
+| `seed`              | `42`                          | RNG seed for the run                                               |
+| `exit_throughput`   | `2`                           | Maximum civilians escaping per exit per tick                       |
+
+## 11. Map file format
+
+Maps in `maps/*.txt` are plain ASCII grids using one character per cell:
+
+| Character | Meaning                                              |
+|-----------|------------------------------------------------------|
+| `.`       | Floor (walkable)                                     |
+| `#`       | Wall                                                 |
+| `E`       | Exit                                                 |
+| `F`       | Fire source (overridden by `fire_position` in config) |
+
+A 36×80 map is 36 lines of 80 characters each. Lines shorter than the
+maximum row are padded with walls. Every map in the experiment has
+four exits.
+
+## 12. Output format
 
 Each row in `results/experiment_results.csv` represents one simulation run.
 
@@ -137,7 +199,7 @@ Key columns:
 
 One simulation tick corresponds to roughly one second of simulated time.
 
-## 9. File layout
+## 13. File layout
 
 ```
 COMP3004-CW/
@@ -167,14 +229,14 @@ COMP3004-CW/
 └── results/                   Experiment output (CSV + analysis)
 ```
 
-## 10. Related documents
+## 14. Related documents
 
 - **Main report**: `Agents_Report.pdf` (submitted separately via Moodle)
 - **Supplementary PDFs**: `agent_specs.pdf`, `statistics.pdf` (submitted as a supplementary zip)
 - **Video demonstration**: `video_COMP3004_20587851.mp4`
   (submitted separately)
 
-## 11. Platform notes
+## 15. Platform notes
 
 - **Windows**: multiprocessing in `experiments/runner.py` is already
   guarded with `if __name__ == "__main__":`. No extra action needed.
