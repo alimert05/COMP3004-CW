@@ -39,7 +39,6 @@ from evacsim.civilian import (
 )
 from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides, spawn_router_guides
 
-
 # --------------------------------------------------------------------
 # Step 1: load the map
 # --------------------------------------------------------------------
@@ -54,20 +53,32 @@ env = Environment(config)
 
 
 # --------------------------------------------------------------------
-# Step 2: window size
+# Step 2: auto-scale window to fit the screen
 # --------------------------------------------------------------------
 
-SCALE = 3
+pygame.init()
+
+# Query the desktop size so the window fits on smaller screens.
+# Leave a 10% width margin and a 15% height margin to allow for the
+# taskbar and window chrome.
+display_info = pygame.display.Info()
+max_w = int(display_info.current_w * 0.95)
+max_h = int(display_info.current_h * 0.9)
+
+# Pick the largest integer SCALE that keeps the window within the
+# available area. Falls back to 1 on very small screens.
+base_w = env.cols * config.cell_size
+base_h = env.rows * config.cell_size
+SCALE = max(1, int(min(max_w / base_w, max_h / base_h)))
+
 CELL = int(config.cell_size * SCALE)
 WIN_W = env.cols * CELL
 WIN_H = env.rows * CELL
 
 
 # --------------------------------------------------------------------
-# Step 3: start Pygame and load tile images
+# Step 3: load tile images
 # --------------------------------------------------------------------
-
-pygame.init()
 
 wall_tile = pygame.transform.scale(pygame.image.load("assets/wall6.png"), (CELL, CELL))
 floor_tile = pygame.transform.scale(
@@ -127,11 +138,13 @@ if VISUAL_GUIDES_ENABLED:
     if VISUAL_GUIDE_POLICY == "beacon":
         guides = spawn_beacon_guides(env, n_guides=n, speed=2.0, seed=77)
     elif VISUAL_GUIDE_POLICY == "sweeper":
-        guides = spawn_sweeper_guides(env, n_guides=n, speed=2.0, seed=77,
-                                      n_civilians=VISUAL_CIVILIAN_NUMBER)
+        guides = spawn_sweeper_guides(
+            env, n_guides=n, speed=2.0, seed=77, n_civilians=VISUAL_CIVILIAN_NUMBER
+        )
     elif VISUAL_GUIDE_POLICY == "router":
-        guides = spawn_router_guides(env, n_guides=n, speed=2.0, seed=77,
-                                     n_civilians=VISUAL_CIVILIAN_NUMBER)
+        guides = spawn_router_guides(
+            env, n_guides=n, speed=2.0, seed=77, n_civilians=VISUAL_CIVILIAN_NUMBER
+        )
 
 # Drawing radii in pixels.
 CIV_RADIUS = max(4, CELL // 4)
@@ -202,6 +215,7 @@ while running:
 
         # Exit-queue processing: at most two civilians per exit per tick.
         import numpy as np
+
         EXIT_THROUGHPUT = 2
         exit_queues = {}
         for i, civ in enumerate(civilians):
@@ -256,17 +270,17 @@ while running:
         sx = int(civ.pos[0] * SCALE)
         sy = int(civ.pos[1] * SCALE)
         if civ.state == DEAD:
-            colour = (200, 30, 30)    # Red: dead.
+            colour = (200, 30, 30)  # Red: dead.
         elif civ.state == QUEUED:
             colour = (255, 255, 255)  # White: waiting in the exit queue.
         elif civ.state == MOVING_TO_EXIT:
-            colour = (50, 220, 50)    # Green: heading to an exit.
+            colour = (50, 220, 50)  # Green: heading to an exit.
         elif civ.state == FLEEING_ROOM:
-            colour = (255, 150, 50)   # Orange: fleeing the current room.
+            colour = (255, 150, 50)  # Orange: fleeing the current room.
         elif civ.state == FOLLOWING_GUIDE:
-            colour = (0, 200, 200)    # Cyan: in a guide's group.
+            colour = (0, 200, 200)  # Cyan: in a guide's group.
         elif civ.state == FOLLOWING:
-            colour = (255, 200, 50)   # Yellow: herding (following crowd).
+            colour = (255, 200, 50)  # Yellow: herding (following crowd).
         elif civ.state == WALL_FOLLOWING:
             colour = (200, 100, 255)  # Purple: blind, hand-on-wall.
         elif civ.state == REACTING:
@@ -274,7 +288,7 @@ while running:
         elif civ.state == IDLE:
             colour = (180, 180, 180)  # Grey: at desk, unaware.
         else:
-            colour = (50, 120, 255)   # Blue: wandering.
+            colour = (50, 120, 255)  # Blue: wandering.
         pygame.draw.circle(screen, colour, (sx, sy), CIV_RADIUS)
         pygame.draw.circle(screen, (0, 0, 0), (sx, sy), CIV_RADIUS, 1)
 
@@ -314,17 +328,22 @@ while running:
         # Radius circle, different visual for each policy type.
         if not guide._self_evacuating:
             from evacsim.guide import BeaconGuide
+
             if isinstance(guide, BeaconGuide):
                 # Beacon: broadcast radius (sound, passes through walls).
                 brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)
                 broadcast_surf = pygame.Surface((brad * 2, brad * 2), pygame.SRCALPHA)
-                pygame.draw.circle(broadcast_surf, (255, 140, 0, 30), (brad, brad), brad)
+                pygame.draw.circle(
+                    broadcast_surf, (255, 140, 0, 30), (brad, brad), brad
+                )
                 screen.blit(broadcast_surf, (gx - brad, gy - brad))
             else:
                 # Sweeper or Router: visual recruit radius (smaller, requires LOS).
                 vrad = int(guide.get_visual_recruit_radius(smoke_system) * SCALE)
                 recruit_surf = pygame.Surface((vrad * 2, vrad * 2), pygame.SRCALPHA)
-                pygame.draw.circle(recruit_surf, (100, 200, 255, 25), (vrad, vrad), vrad)
+                pygame.draw.circle(
+                    recruit_surf, (100, 200, 255, 25), (vrad, vrad), vrad
+                )
                 screen.blit(recruit_surf, (gx - vrad, gy - vrad))
 
     # Advance GIF animation frames.
