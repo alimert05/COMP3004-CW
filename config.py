@@ -43,7 +43,7 @@ class SimConfig:
 # changes here do not affect the headless experiment.
 
 VISUAL_CIVILIAN_NUMBER = 100
-VISUAL_GUIDE_POLICY = "none"
+VISUAL_GUIDE_POLICY = "router"
 VISUAL_GUIDES_ENABLED = True
 VISUAL_GUIDE_COUNT = None  # Default: one guide per exit (typically 4).
 VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",

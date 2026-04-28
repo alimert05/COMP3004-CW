@@ -4,6 +4,13 @@ An agent-based fire evacuation simulator that compares three guide agent
 policies (Beacon, Sweeper, Router) across a 14,400-run factorial experiment
 covering eight topologies, five fire positions, and three crowd sizes.
 
+
+![Simulation demo](assets/demo.gif)
+
+*Router policy on a bottleneck map: civilians (coloured by state)
+evacuate as fire and smoke spread; guides (orange diamonds) collect
+and escort groups to exits.*
+
 ## 1. Author
 
 Ali Karaoglu (20587851)
