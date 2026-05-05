@@ -58,14 +58,14 @@ class RouterBlackboard:
     using an inter-agent potential-field approach.
     """
 
-    CLAIM_EXPIRY = 60      # Ticks before a hotspot claim expires.
-    POSITION_EXPIRY = 10   # Ticks before a position becomes stale.
+    CLAIM_EXPIRY = 60  # Ticks before a hotspot claim expires.
+    POSITION_EXPIRY = 10  # Ticks before a position becomes stale.
     EXIT_CLAIM_EXPIRY = 10  # Refreshed each tick during ESCORTING; the
     # TTL only catches silent-death cleanup, matching POSITION_EXPIRY.
 
     def __init__(self):
-        self._claims = {}       # guide_id -> (position, tick_claimed)
-        self._positions = {}    # guide_id -> (position, tick_updated)
+        self._claims = {}  # guide_id -> (position, tick_claimed)
+        self._positions = {}  # guide_id -> (position, tick_updated)
         self._exit_claims = {}  # guide_id -> (exit_pos, group_size, tick)
 
     # -- Hotspot claims --
@@ -1233,12 +1233,13 @@ class RouterGuide(Guide):
             IDLE,
             REACTING,
             FOLLOWING_GUIDE,
+            QUEUED,
         )
 
         for civ in civilians:
             if len(self._group) >= self._effective_max_group():
                 break
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
@@ -1270,10 +1271,11 @@ class RouterGuide(Guide):
             IDLE,
             REACTING,
             FOLLOWING_GUIDE,
+            QUEUED,
         )
 
         for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
