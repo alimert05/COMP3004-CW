@@ -42,9 +42,9 @@ class SimConfig:
 # SimConfig objects directly. The VISUAL_ prefix marks the scope so
 # changes here do not affect the headless experiment.
 
-VISUAL_CIVILIAN_NUMBER = 0
-VISUAL_GUIDE_POLICY = "none"
+VISUAL_CIVILIAN_NUMBER = 50
+VISUAL_GUIDE_POLICY = "router"  # "none", "beacon", "sweeper", "router"
 VISUAL_GUIDES_ENABLED = True
 VISUAL_GUIDE_COUNT = None  # Default: one guide per exit (typically 4).
-VISUAL_FIRE_POSITION = None  # "center", "top_left", "top_right",
+VISUAL_FIRE_POSITION = "center"  # "center", "top_left", "top_right",
 # "bottom_left", "bottom_right"
