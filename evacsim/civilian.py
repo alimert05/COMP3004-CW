@@ -25,25 +25,23 @@ from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
 from evacsim.guide import bfs_path
 
-
 # -- States --
-IDLE = 0            # Pre-evacuation: at desk, unaware of the emergency.
-REACTING = 1        # Emergency noticed; frozen during the reaction delay.
-FLEEING_ROOM = 2    # Following a BFS path to a corridor doorway.
-WANDERING = 3       # Random walk with no goal.
+IDLE = 0  # Pre-evacuation: at desk, unaware of the emergency.
+REACTING = 1  # Emergency noticed; frozen during the reaction delay.
+FLEEING_ROOM = 2  # Following a BFS path to a corridor doorway.
+WANDERING = 3  # Random walk with no goal.
 WALL_FOLLOWING = 4  # Blind in smoke; hand-on-wall navigation.
-FOLLOWING = 5       # Herding: biased toward a leader or a crowd direction.
-FOLLOWING_GUIDE = 6 # In a guide's group; uses hybrid BFS plus boids.
+FOLLOWING = 5  # Herding: biased toward a leader or a crowd direction.
+FOLLOWING_GUIDE = 6  # In a guide's group; uses hybrid BFS plus boids.
 MOVING_TO_EXIT = 7  # Following a BFS path to a known exit.
-QUEUED = 8          # At the exit, waiting in line to escape.
+QUEUED = 8  # At the exit, waiting in line to escape.
 ESCAPED = 9
 DEAD = 10
 
 
 class Civilian:
 
-    def __init__(self, x: float, y: float, speed: float,
-                 rng: np.random.Generator):
+    def __init__(self, x: float, y: float, speed: float, rng: np.random.Generator):
         self.pos = np.array([x, y], dtype=float)
         self.vel = np.array([0.0, 0.0])
         self.speed = speed
@@ -52,7 +50,7 @@ class Civilian:
         # Two vision ranges. People are large moving objects (easier to
         # spot); exits are static signs (smaller, easier to miss).
         self.people_vision_radius = 70.0  # 7 cells, about 20 m in clear air.
-        self.exit_vision_radius = 25.0    # 2.5 cells, about 7.5 m in clear air.
+        self.exit_vision_radius = 25.0  # 2.5 cells, about 7.5 m in clear air.
 
         self.state = IDLE
 
@@ -95,17 +93,22 @@ class Civilian:
 
         # State for following a guide via the hybrid BFS-plus-boids loop.
         self.assigned_guide = None
-        self._boids_bfs_cache = []     # Cached BFS path to the guide.
-        self._boids_bfs_tick = 0       # Tick when the cache was last refreshed.
+        self._boids_bfs_cache = []  # Cached BFS path to the guide.
+        self._boids_bfs_tick = 0  # Tick when the cache was last refreshed.
         self._cached_guide_pos = None  # Guide position at cache build, used
-                                       # for distance-based invalidation.
+        # for distance-based invalidation.
 
     # ----------------------------------------------------------------
     # Main update
     # ----------------------------------------------------------------
 
-    def update(self, env: Environment, smoke: SmokeSystem,
-               fire: FireSystem, all_civilians: list) -> None:
+    def update(
+        self,
+        env: Environment,
+        smoke: SmokeSystem,
+        fire: FireSystem,
+        all_civilians: list,
+    ) -> None:
 
         if self.state in (ESCAPED, DEAD):
             return
@@ -131,9 +134,12 @@ class Civilian:
         # by others, so their ambient motion does not cause cascading
         # false alarms.
         if self.state == IDLE:
-            if (in_fire or in_smoke
-                    or self._sense_danger(env, smoke, fire)
-                    or self._see_others_fleeing(all_civilians)):
+            if (
+                in_fire
+                or in_smoke
+                or self._sense_danger(env, smoke, fire)
+                or self._see_others_fleeing(all_civilians)
+            ):
                 self.state = REACTING
                 self._reaction_counter = 0
                 return
@@ -288,7 +294,9 @@ class Civilian:
                         self._herding_leader = new_leader
                         self._herding_commitment = 20
                     else:
-                        crowd_dir = self._sense_crowd_direction(all_civilians, people_vision)
+                        crowd_dir = self._sense_crowd_direction(
+                            all_civilians, people_vision
+                        )
                         if crowd_dir is not None:
                             self._walk_dir = crowd_dir
                             self._herding_leader = None
@@ -319,8 +327,9 @@ class Civilian:
                 #     guide where neither can move. Without case (b)
                 #     a pinned agent could stay in FOLLOWING_GUIDE
                 #     until it dies of smoke.
-                far_and_stuck = (dist_to_guide > env.cell_size * 20
-                                 and self._stuck_ticks >= 8)
+                far_and_stuck = (
+                    dist_to_guide > env.cell_size * 20 and self._stuck_ticks >= 8
+                )
                 long_stuck = self._stuck_ticks >= 30
                 if far_and_stuck or long_stuck:
                     try:
@@ -335,7 +344,8 @@ class Civilian:
                     # BFS gives direction (handles walls, doorways).
                     # Boids separation prevents piling up.
                     self.vel = self._hybrid_boids_follow(
-                        guide, all_civilians, speed, env)
+                        guide, all_civilians, speed, env
+                    )
 
         elif self.state == WALL_FOLLOWING:
             # Blind in smoke: hand-on-wall.
@@ -375,7 +385,7 @@ class Civilian:
 
         doorway = self._find_doorway(env)
         if doorway is not None:
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._waypoints = bfs_path(env, self.pos, doorway, fire_grid=fg)
             self.state = FLEEING_ROOM
         else:
@@ -391,14 +401,14 @@ class Civilian:
         if self.state == FOLLOWING_GUIDE:
             return
         self._target_exit = exit_pos
-        fg = getattr(self, '_fire_grid', None)
+        fg = getattr(self, "_fire_grid", None)
         self._waypoints = bfs_path(env, self.pos, np.array(exit_pos), fire_grid=fg)
         self.state = MOVING_TO_EXIT
 
     def _set_exit_target_force(self, env, exit_pos):
         """Force-set the exit target. Used when a guide releases the group."""
         self._target_exit = exit_pos
-        fg = getattr(self, '_fire_grid', None)
+        fg = getattr(self, "_fire_grid", None)
         self._waypoints = bfs_path(env, self.pos, np.array(exit_pos), fire_grid=fg)
         self.state = MOVING_TO_EXIT
         self.assigned_guide = None
@@ -501,7 +511,7 @@ class Civilian:
         if self._boids_bfs_tick >= 8 or guide_moved > env.cell_size * 2:
             self._boids_bfs_tick = 0
             self._cached_guide_pos = guide.pos.copy()
-            fg = getattr(self, '_fire_grid', None)
+            fg = getattr(self, "_fire_grid", None)
             self._boids_bfs_cache = bfs_path(env, self.pos, guide.pos, fire_grid=fg)
 
         # Follow the cached BFS waypoints.
@@ -667,7 +677,7 @@ class Civilian:
         evacuating, the agent infers there is danger and starts to
         react. Requires line of sight; walls block the cue.
         """
-        env = getattr(self, '_env_ref', None)
+        env = getattr(self, "_env_ref", None)
         for other in all_civilians:
             if other is self:
                 continue
@@ -688,7 +698,7 @@ class Civilian:
         FLEEING_ROOM, the states that look 'confident'. People follow
         the confident person rather than the panicking crowd.
         """
-        env = getattr(self, '_env_ref', None)
+        env = getattr(self, "_env_ref", None)
         best, best_d = None, float("inf")
         for other in all_civilians:
             if other is self:
@@ -775,6 +785,7 @@ class Civilian:
         in some cardinal direction. Searches up to 25 cells.
         """
         from collections import deque
+
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = env.grid.shape
 
@@ -782,7 +793,11 @@ class Civilian:
             best = 0
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 n, nr, nc = 0, r + dr, c + dc
-                while 0 <= nr < rows and 0 <= nc < cols and env.grid[nr, nc] != CellType.WALL:
+                while (
+                    0 <= nr < rows
+                    and 0 <= nc < cols
+                    and env.grid[nr, nc] != CellType.WALL
+                ):
                     n += 1
                     nr += dr
                     nc += dc
@@ -810,12 +825,12 @@ class Civilian:
         return None
 
 
-# --------------------------------------------------------------------
 # Spawning
-# --------------------------------------------------------------------
 
-def spawn_civilians(env: Environment, n: int, speed: float = 1.5,
-                    seed: int = 99) -> list[Civilian]:
+
+def spawn_civilians(
+    env: Environment, n: int, speed: float = 1.5, seed: int = 99
+) -> list[Civilian]:
     """Create n civilians at room-clustered floor positions."""
     positions = env.spawn_positions(n, seed=seed)
     rng = np.random.default_rng(seed)

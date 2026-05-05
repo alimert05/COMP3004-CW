@@ -68,8 +68,6 @@ class RouterBlackboard:
         self._positions = {}  # guide_id -> (position, tick_updated)
         self._exit_claims = {}  # guide_id -> (exit_pos, group_size, tick)
 
-    # -- Hotspot claims --
-
     def claim(self, guide_id, position, tick):
         """Claim a hotspot position."""
         self._claims[guide_id] = (np.array(position), tick)
@@ -100,8 +98,6 @@ class RouterBlackboard:
                 return True
         return False
 
-    # -- Position channel (inter-guide spread) --
-
     def update_position(self, guide_id, position, tick):
         """Record the current position of a Router. Called every tick."""
         self._positions[guide_id] = (np.array(position, dtype=float), tick)
@@ -121,8 +117,6 @@ class RouterBlackboard:
                 continue
             result.append(pos)
         return result
-
-    # -- Exit claims (destination coordination) --
 
     def update_exit_claim(self, guide_id, exit_pos, group_size, tick):
         """Refresh the exit claim. Called every tick while ESCORTING.
@@ -197,8 +191,7 @@ class RouterGuide(Guide):
            ticks if a substantially better option appears.
         5. RELEASING. Stand at the exit and forward civilians into the
            queue.
-        6. RETURNING (kept for future phase reuse; the guide
-           transitions directly back to SCANNING after RELEASING).
+        6. SCAN AGAIN.
 
     Architectural elements that distinguish this policy from the
     others: a global hotspot scan rather than a fixed territory, a
@@ -399,8 +392,6 @@ class RouterGuide(Guide):
             self._do_releasing(env, smoke)
         elif self._phase == self.RETURNING:
             self._do_returning(env, smoke, civilians)
-
-    # -- Phase behaviours --
 
     def _do_scanning(self, env, smoke, civilians):
         # If the guide is carrying civilians and danger is nearby,
@@ -1028,8 +1019,6 @@ class RouterGuide(Guide):
             # Divert to escort only if the group meets the floor.
             if len(self._group) >= self._min_group:
                 self._start_escort(env, smoke, civilians)
-
-    # -- Intelligence methods --
 
     def _find_hotspot(self, env, smoke, civilians):
         """Find the best hotspot via DBSCAN with an individual fallback.

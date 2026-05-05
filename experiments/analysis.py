@@ -8,7 +8,6 @@ Reads results/experiment_results.csv and produces:
     - Tukey HSD pairwise comparisons with Cohen's d.
     - Cumulative evacuation curves per policy.
     - Box plots, line plots, heatmap, and bar charts.
-    - A plain-English summary suitable for copy into the report.
 
 Metrics analysed:
     survival_rate     TV / n_civilians, the primary outcome.
@@ -32,6 +31,7 @@ try:
     import pandas as pd
     import numpy as np
     import matplotlib
+
     matplotlib.use("Agg")  # Non-interactive backend; works headless.
     import matplotlib.pyplot as plt
     from scipy import stats
@@ -45,15 +45,19 @@ try:
     import statsmodels.api as sm
     from statsmodels.formula.api import ols
     from statsmodels.stats.multicomp import pairwise_tukeyhsd
+
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
-    print("WARNING: statsmodels not installed. Tukey HSD and two-way ANOVA will "
-          "be skipped.\n         Install with:  pip install statsmodels")
+    print(
+        "WARNING: statsmodels not installed. Tukey HSD and two-way ANOVA will "
+        "be skipped.\n         Install with:  pip install statsmodels"
+    )
 
 # -- Optional: seaborn for nicer plot styling --
 try:
     import seaborn as sns
+
     HAS_SEABORN = True
     sns.set_theme(style="whitegrid", context="talk")
 except ImportError:
@@ -63,20 +67,19 @@ except ImportError:
 # -- Constants --
 POLICY_ORDER = ["none", "beacon", "sweeper", "router"]
 POLICY_COLORS = {
-    "none":    "#8E8E8E",
-    "beacon":  "#F2C14E",
+    "none": "#8E8E8E",
+    "beacon": "#F2C14E",
     "sweeper": "#5B8FF9",
-    "router":  "#E57373",
+    "router": "#E57373",
 }
-BIN_EDGES = [0, 500, 1000, 1500, 2000, 2500, 3000,
-             3500, 4000, 4500, 5000, 5500, 6000]
-BIN_COLUMNS = [f"escaped_{lo}_{hi}" for lo, hi in
-               zip(BIN_EDGES[:-1], BIN_EDGES[1:])]
+BIN_EDGES = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+BIN_COLUMNS = [f"escaped_{lo}_{hi}" for lo, hi in zip(BIN_EDGES[:-1], BIN_EDGES[1:])]
 
 
 # --------------------------------------------------------------------
 # 1. Data loading and preprocessing
 # --------------------------------------------------------------------
+
 
 def load_data(csv_path: str) -> pd.DataFrame:
     """Load the experiment CSV and augment it with derived columns."""
@@ -84,19 +87,18 @@ def load_data(csv_path: str) -> pd.DataFrame:
 
     # Derive map_type from the file name.
     df["map_type"] = df["map"].apply(
-        lambda p: "bottleneck" if "bottleneck" in p else
-                  ("open_plan" if "open_plan" in p else "other")
+        lambda p: (
+            "bottleneck"
+            if "bottleneck" in p
+            else ("open_plan" if "open_plan" in p else "other")
+        )
     )
 
     # Derive a clean map name (strip path and extension).
-    df["map_name"] = df["map"].apply(
-        lambda p: os.path.splitext(os.path.basename(p))[0]
-    )
+    df["map_name"] = df["map"].apply(lambda p: os.path.splitext(os.path.basename(p))[0])
 
     # Order the policy column so plots and tables follow a fixed sequence.
-    df["policy"] = pd.Categorical(
-        df["policy"], categories=POLICY_ORDER, ordered=True
-    )
+    df["policy"] = pd.Categorical(df["policy"], categories=POLICY_ORDER, ordered=True)
 
     # Data-integrity check: drop any errored runs.
     n_errors = 0
@@ -111,7 +113,9 @@ def load_data(csv_path: str) -> pd.DataFrame:
     print(f"  Policies:  {list(df['policy'].cat.categories)}")
     print(f"  Crowd:     {sorted(df['n_civilians'].unique())}")
     print(f"  Fire pos:  {sorted(df['fire_position'].unique())}")
-    print(f"  Trials:    {df.groupby(['map', 'fire_position', 'policy', 'n_civilians'], observed=True).size().describe()['mean']:.0f} (mean)")
+    print(
+        f"  Trials:    {df.groupby(['map', 'fire_position', 'policy', 'n_civilians'], observed=True).size().describe()['mean']:.0f} (mean)"
+    )
 
     return df
 
@@ -119,6 +123,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
 # --------------------------------------------------------------------
 # 2. Descriptive statistics
 # --------------------------------------------------------------------
+
 
 def _ci95(series: pd.Series) -> float:
     """Half-width of the 95 percent confidence interval for a sample."""
@@ -140,21 +145,23 @@ def descriptive_stats(df: pd.DataFrame) -> dict:
     tables["per_policy"] = overall
 
     # Per policy and crowd size.
-    per_policy_crowd = df.groupby(
-        ["policy", "n_civilians"], observed=True
-    )[metrics].agg(["mean", "std", _ci95])
+    per_policy_crowd = df.groupby(["policy", "n_civilians"], observed=True)[
+        metrics
+    ].agg(["mean", "std", _ci95])
     tables["per_policy_crowd"] = per_policy_crowd
 
     # Per policy and map type.
-    per_policy_maptype = df.groupby(
-        ["policy", "map_type"], observed=True
-    )[metrics].agg(["mean", "std", _ci95])
+    per_policy_maptype = df.groupby(["policy", "map_type"], observed=True)[metrics].agg(
+        ["mean", "std", _ci95]
+    )
     tables["per_policy_maptype"] = per_policy_maptype
 
     # Per policy and individual map (used for the heatmap).
-    per_policy_map = df.groupby(
-        ["policy", "map_name"], observed=True
-    )["survival_rate"].mean().unstack(level="map_name")
+    per_policy_map = (
+        df.groupby(["policy", "map_name"], observed=True)["survival_rate"]
+        .mean()
+        .unstack(level="map_name")
+    )
     tables["per_policy_map_heatmap"] = per_policy_map
 
     return tables
@@ -167,18 +174,32 @@ def per_condition_summary(df: pd.DataFrame) -> pd.DataFrame:
     primary metric.
     """
     group_cols = ["map_name", "fire_position", "policy", "n_civilians"]
-    metrics = ["TV", "TM", "MP", "MT", "survival_rate",
-               "evacuation_time", "guides_survived"]
+    metrics = [
+        "TV",
+        "TM",
+        "MP",
+        "MT",
+        "survival_rate",
+        "evacuation_time",
+        "guides_survived",
+    ]
 
     agg_funcs = {}
     for m in metrics:
         agg_funcs[m] = ["mean", "std", "min", "max"]
 
-    grouped = df.groupby(group_cols, observed=True).agg(
-        n_trials=("TV", "count"),
-        **{f"{m}_{stat}": (m, stat)
-           for m in metrics for stat in ["mean", "std", "min", "max"]}
-    ).reset_index()
+    grouped = (
+        df.groupby(group_cols, observed=True)
+        .agg(
+            n_trials=("TV", "count"),
+            **{
+                f"{m}_{stat}": (m, stat)
+                for m in metrics
+                for stat in ["mean", "std", "min", "max"]
+            },
+        )
+        .reset_index()
+    )
 
     return grouped
 
@@ -187,13 +208,15 @@ def per_condition_summary(df: pd.DataFrame) -> pd.DataFrame:
 # 3. Inferential statistics
 # --------------------------------------------------------------------
 
+
 def _cohens_d(x: np.ndarray, y: np.ndarray) -> float:
     """Cohen's d effect size for two independent samples (pooled SD)."""
     nx, ny = len(x), len(y)
     if nx < 2 or ny < 2:
         return float("nan")
-    pooled_sd = np.sqrt(((nx - 1) * x.var(ddof=1) + (ny - 1) * y.var(ddof=1))
-                        / (nx + ny - 2))
+    pooled_sd = np.sqrt(
+        ((nx - 1) * x.var(ddof=1) + (ny - 1) * y.var(ddof=1)) / (nx + ny - 2)
+    )
     if pooled_sd == 0:
         return float("nan")
     return (x.mean() - y.mean()) / pooled_sd
@@ -202,29 +225,33 @@ def _cohens_d(x: np.ndarray, y: np.ndarray) -> float:
 def _interpret_d(d: float) -> str:
     """Return a verbal magnitude label for Cohen's d."""
     ad = abs(d)
-    if ad < 0.2:  return "negligible"
-    if ad < 0.5:  return "small"
-    if ad < 0.8:  return "medium"
+    if ad < 0.2:
+        return "negligible"
+    if ad < 0.5:
+        return "small"
+    if ad < 0.8:
+        return "medium"
     return "large"
 
 
 def _interpret_eta2(eta2: float) -> str:
     """Return a verbal magnitude label for eta-squared."""
-    if eta2 < 0.01: return "negligible"
-    if eta2 < 0.06: return "small"
-    if eta2 < 0.14: return "medium"
+    if eta2 < 0.01:
+        return "negligible"
+    if eta2 < 0.06:
+        return "small"
+    if eta2 < 0.14:
+        return "medium"
     return "large"
 
 
-def one_way_anova(df: pd.DataFrame, metric: str,
-                  factor: str = "policy") -> dict:
+def one_way_anova(df: pd.DataFrame, metric: str, factor: str = "policy") -> dict:
     """One-way ANOVA of a metric against a factor.
 
     Returns a dictionary with F, p, eta-squared, a verbal magnitude
     label, and per-group descriptive statistics.
     """
-    groups = [g[metric].dropna().values
-              for _, g in df.groupby(factor, observed=True)]
+    groups = [g[metric].dropna().values for _, g in df.groupby(factor, observed=True)]
     if len(groups) < 2 or any(len(g) < 2 for g in groups):
         return {"error": "Not enough data for ANOVA"}
 
@@ -247,15 +274,12 @@ def one_way_anova(df: pd.DataFrame, metric: str,
         "significant": p_val < 0.05,
         "groups": {
             str(name): {"n": len(g), "mean": g.mean(), "std": g.std(ddof=1)}
-            for (name, _), g in zip(
-                df.groupby(factor, observed=True), groups
-            )
+            for (name, _), g in zip(df.groupby(factor, observed=True), groups)
         },
     }
 
 
-def two_way_anova(df: pd.DataFrame, metric: str,
-                  factor1: str, factor2: str) -> str:
+def two_way_anova(df: pd.DataFrame, metric: str, factor1: str, factor2: str) -> str:
     """Two-way ANOVA with interaction term. Returns the formatted text table."""
     if not HAS_STATSMODELS:
         return "statsmodels not installed; two-way ANOVA skipped."
@@ -268,8 +292,9 @@ def two_way_anova(df: pd.DataFrame, metric: str,
         return f"ANOVA failed: {e}"
 
 
-def tukey_posthoc(df: pd.DataFrame, metric: str,
-                  factor: str = "policy") -> pd.DataFrame:
+def tukey_posthoc(
+    df: pd.DataFrame, metric: str, factor: str = "policy"
+) -> pd.DataFrame:
     """Tukey HSD pairwise comparisons with Cohen's d added per pair."""
     if not HAS_STATSMODELS:
         return pd.DataFrame({"error": ["statsmodels not installed"]})
@@ -283,25 +308,27 @@ def tukey_posthoc(df: pd.DataFrame, metric: str,
             x = sub[sub[factor].astype(str) == g1][metric].values
             y = sub[sub[factor].astype(str) == g2][metric].values
             d = _cohens_d(x, y)
-            rows.append({
-                "group1": g1,
-                "group2": g2,
-                "meandiff": meandiff,
-                "p_adj": p_adj,
-                "lower_ci": lower,
-                "upper_ci": upper,
-                "reject_H0": reject,
-                "cohens_d": d,
-                "d_magnitude": _interpret_d(d) if not np.isnan(d) else "n/a",
-            })
+            rows.append(
+                {
+                    "group1": g1,
+                    "group2": g2,
+                    "meandiff": meandiff,
+                    "p_adj": p_adj,
+                    "lower_ci": lower,
+                    "upper_ci": upper,
+                    "reject_H0": reject,
+                    "cohens_d": d,
+                    "d_magnitude": _interpret_d(d) if not np.isnan(d) else "n/a",
+                }
+            )
         return pd.DataFrame(rows)
     except Exception as e:
         return pd.DataFrame({"error": [str(e)]})
 
 
-def per_map_paired_comparison(df: pd.DataFrame,
-                              policy_a: str, policy_b: str,
-                              metric: str = "survival_rate") -> pd.DataFrame:
+def per_map_paired_comparison(
+    df: pd.DataFrame, policy_a: str, policy_b: str, metric: str = "survival_rate"
+) -> pd.DataFrame:
     """Paired t-test comparing policy_a vs policy_b on each map separately.
 
     Uses the fully paired experimental design: within each map, the
@@ -330,22 +357,25 @@ def per_map_paired_comparison(df: pd.DataFrame,
         t_stat, p_val = stats.ttest_rel(a.values, b.values)
         dz = diff.mean() / sd_diff
         ci_half = 1.96 * sd_diff / np.sqrt(n)
-        rows.append({
-            "map": map_name,
-            "n_pairs": n,
-            "mean_diff": round(diff.mean(), 4),
-            "ci_low": round(diff.mean() - ci_half, 4),
-            "ci_high": round(diff.mean() + ci_half, 4),
-            "t": round(t_stat, 3),
-            "p": p_val,
-            "cohens_dz": round(dz, 3),
-            "magnitude": _interpret_d(dz),
-        })
+        rows.append(
+            {
+                "map": map_name,
+                "n_pairs": n,
+                "mean_diff": round(diff.mean(), 4),
+                "ci_low": round(diff.mean() - ci_half, 4),
+                "ci_high": round(diff.mean() + ci_half, 4),
+                "t": round(t_stat, 3),
+                "p": p_val,
+                "cohens_dz": round(dz, 3),
+                "magnitude": _interpret_d(dz),
+            }
+        )
     return pd.DataFrame(rows)
 
 
-def two_way_anova_with_partial_eta(df: pd.DataFrame, metric: str,
-                                    factor1: str, factor2: str) -> pd.DataFrame:
+def two_way_anova_with_partial_eta(
+    df: pd.DataFrame, metric: str, factor1: str, factor2: str
+) -> pd.DataFrame:
     """Two-way ANOVA with partial eta-squared added for each effect.
 
     partial_eta2 = SS_effect / (SS_effect + SS_residual): the
@@ -356,14 +386,13 @@ def two_way_anova_with_partial_eta(df: pd.DataFrame, metric: str,
     if not HAS_STATSMODELS:
         return pd.DataFrame({"error": ["statsmodels not installed"]})
     try:
-        formula = (f"{metric} ~ C({factor1}) + C({factor2}) "
-                   f"+ C({factor1}):C({factor2})")
+        formula = (
+            f"{metric} ~ C({factor1}) + C({factor2}) " f"+ C({factor1}):C({factor2})"
+        )
         model = ols(formula, data=df).fit()
         table = sm.stats.anova_lm(model, typ=2).copy()
         ss_residual = table.loc["Residual", "sum_sq"]
-        table["partial_eta2"] = table["sum_sq"] / (
-            table["sum_sq"] + ss_residual
-        )
+        table["partial_eta2"] = table["sum_sq"] / (table["sum_sq"] + ss_residual)
         table.at["Residual", "partial_eta2"] = float("nan")
         table["magnitude"] = table["partial_eta2"].apply(
             lambda x: _interpret_eta2(x) if not pd.isna(x) else "n/a"
@@ -373,8 +402,9 @@ def two_way_anova_with_partial_eta(df: pd.DataFrame, metric: str,
         return pd.DataFrame({"error": [str(e)]})
 
 
-def interaction_decomposition(df: pd.DataFrame, metric: str,
-                                maps_to_exclude: list) -> pd.DataFrame:
+def interaction_decomposition(
+    df: pd.DataFrame, metric: str, maps_to_exclude: list
+) -> pd.DataFrame:
     """Decompose the policy by map-type interaction by excluded maps.
 
     Re-runs the two-way ANOVA (policy by map_type) on the full dataset
@@ -391,9 +421,7 @@ def interaction_decomposition(df: pd.DataFrame, metric: str,
         return pd.DataFrame({"error": ["statsmodels not installed"]})
     try:
         # Full ANOVA (all maps).
-        full_table = two_way_anova_with_partial_eta(
-            df, metric, "policy", "map_type"
-        )
+        full_table = two_way_anova_with_partial_eta(df, metric, "policy", "map_type")
         full_row = full_table.loc["C(policy):C(map_type)"]
 
         # Filtered ANOVA (excluding specified maps).
@@ -403,27 +431,29 @@ def interaction_decomposition(df: pd.DataFrame, metric: str,
         )
         filt_row = filt_table.loc["C(policy):C(map_type)"]
 
-        return pd.DataFrame([
-            {
-                "scenario": "full (all 8 maps)",
-                "n_runs": len(df),
-                "F": float(full_row["F"]),
-                "p": float(full_row["PR(>F)"]),
-                "partial_eta2": float(full_row["partial_eta2"]),
-                "magnitude": full_row["magnitude"],
-            },
-            {
-                "scenario": (
-                    f"excluding {', '.join(maps_to_exclude)} "
-                    f"({len(df) - len(df_filtered)} runs dropped)"
-                ),
-                "n_runs": len(df_filtered),
-                "F": float(filt_row["F"]),
-                "p": float(filt_row["PR(>F)"]),
-                "partial_eta2": float(filt_row["partial_eta2"]),
-                "magnitude": filt_row["magnitude"],
-            },
-        ])
+        return pd.DataFrame(
+            [
+                {
+                    "scenario": "full (all 8 maps)",
+                    "n_runs": len(df),
+                    "F": float(full_row["F"]),
+                    "p": float(full_row["PR(>F)"]),
+                    "partial_eta2": float(full_row["partial_eta2"]),
+                    "magnitude": full_row["magnitude"],
+                },
+                {
+                    "scenario": (
+                        f"excluding {', '.join(maps_to_exclude)} "
+                        f"({len(df) - len(df_filtered)} runs dropped)"
+                    ),
+                    "n_runs": len(df_filtered),
+                    "F": float(filt_row["F"]),
+                    "p": float(filt_row["PR(>F)"]),
+                    "partial_eta2": float(filt_row["partial_eta2"]),
+                    "magnitude": filt_row["magnitude"],
+                },
+            ]
+        )
     except Exception as e:
         return pd.DataFrame({"error": [str(e)]})
 
@@ -432,20 +462,25 @@ def interaction_decomposition(df: pd.DataFrame, metric: str,
 # 4. Visualisations
 # --------------------------------------------------------------------
 
+
 def _setup_fig(figsize=(10, 6)):
     """Create a fresh figure-and-axes pair with a default size."""
     fig, ax = plt.subplots(figsize=figsize)
     return fig, ax
 
 
-def plot_boxplot_policy(df: pd.DataFrame, metric: str,
-                        outpath: Path, ylabel: str = None):
+def plot_boxplot_policy(
+    df: pd.DataFrame, metric: str, outpath: Path, ylabel: str = None
+):
     """Box plot of one metric grouped by policy."""
     fig, ax = _setup_fig()
-    data = [df[df["policy"] == p][metric].dropna().values
-            for p in POLICY_ORDER]
-    bp = ax.boxplot(data, tick_labels=POLICY_ORDER, patch_artist=True,
-                    medianprops=dict(color="black", linewidth=2))
+    data = [df[df["policy"] == p][metric].dropna().values for p in POLICY_ORDER]
+    bp = ax.boxplot(
+        data,
+        tick_labels=POLICY_ORDER,
+        patch_artist=True,
+        medianprops=dict(color="black", linewidth=2),
+    )
     for patch, p in zip(bp["boxes"], POLICY_ORDER):
         patch.set_facecolor(POLICY_COLORS[p])
         patch.set_alpha(0.7)
@@ -457,8 +492,9 @@ def plot_boxplot_policy(df: pd.DataFrame, metric: str,
     plt.close()
 
 
-def plot_boxplot_by_map_type(df: pd.DataFrame, metric: str,
-                              outpath: Path, ylabel: str = None):
+def plot_boxplot_by_map_type(
+    df: pd.DataFrame, metric: str, outpath: Path, ylabel: str = None
+):
     """Grouped box plot: policy by map_type."""
     fig, ax = _setup_fig(figsize=(12, 6))
     positions = []
@@ -467,7 +503,9 @@ def plot_boxplot_by_map_type(df: pd.DataFrame, metric: str,
     x = 0
     for mt in ["bottleneck", "open_plan"]:
         for p in POLICY_ORDER:
-            values = df[(df["policy"] == p) & (df["map_type"] == mt)][metric].dropna().values
+            values = (
+                df[(df["policy"] == p) & (df["map_type"] == mt)][metric].dropna().values
+            )
             if len(values):
                 positions.append(x)
                 data.append(values)
@@ -475,8 +513,12 @@ def plot_boxplot_by_map_type(df: pd.DataFrame, metric: str,
             x += 1
         x += 1  # Gap between map-type groups.
 
-    bp = ax.boxplot(data, positions=positions, patch_artist=True,
-                    medianprops=dict(color="black", linewidth=2))
+    bp = ax.boxplot(
+        data,
+        positions=positions,
+        patch_artist=True,
+        medianprops=dict(color="black", linewidth=2),
+    )
     for patch, lab in zip(bp["boxes"], labels):
         pol = lab.split("\n")[0]
         patch.set_facecolor(POLICY_COLORS[pol])
@@ -494,11 +536,21 @@ def plot_line_crowd_vs_survival(df: pd.DataFrame, outpath: Path):
     """Line chart of mean survival_rate vs crowd size, one line per policy."""
     fig, ax = _setup_fig()
     for p in POLICY_ORDER:
-        sub = df[df["policy"] == p].groupby("n_civilians")["survival_rate"].agg(
-            ["mean", _ci95]
+        sub = (
+            df[df["policy"] == p]
+            .groupby("n_civilians")["survival_rate"]
+            .agg(["mean", _ci95])
         )
-        ax.errorbar(sub.index, sub["mean"], yerr=sub["_ci95"], marker="o",
-                    capsize=4, linewidth=2, label=p, color=POLICY_COLORS[p])
+        ax.errorbar(
+            sub.index,
+            sub["mean"],
+            yerr=sub["_ci95"],
+            marker="o",
+            capsize=4,
+            linewidth=2,
+            label=p,
+            color=POLICY_COLORS[p],
+        )
     ax.set_xlabel("Crowd size (n_civilians)")
     ax.set_ylabel("Mean survival rate")
     ax.set_title("Survival rate by crowd size, with 95 percent CI")
@@ -525,8 +577,15 @@ def plot_heatmap_map_policy(tables: dict, outpath: Path):
         for j in range(len(data.columns)):
             val = data.values[i, j]
             txt_color = "white" if val < 0.35 or val > 0.75 else "black"
-            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
-                    color=txt_color, fontsize=9)
+            ax.text(
+                j,
+                i,
+                f"{val:.2f}",
+                ha="center",
+                va="center",
+                color=txt_color,
+                fontsize=9,
+            )
 
     ax.set_title("Mean survival rate by map and policy")
     plt.colorbar(im, ax=ax, label="Survival rate")
@@ -556,8 +615,7 @@ def plot_bar_evac_time(df: pd.DataFrame, outpath: Path):
     plt.close()
 
 
-def plot_evacuation_curves(df: pd.DataFrame, outpath: Path,
-                            by_map_type: bool = False):
+def plot_evacuation_curves(df: pd.DataFrame, outpath: Path, by_map_type: bool = False):
     """Cumulative percent-escaped curves over time, per policy.
 
     Uses the binned escape counts per run. Aggregates across trials
@@ -598,8 +656,7 @@ def plot_evacuation_curves(df: pd.DataFrame, outpath: Path,
             # Prepend (0, 0) so the curve starts at the origin.
             xs = [0] + xs
             ys = [0] + ys
-            ax.plot(xs, ys, marker="o", linewidth=2.2,
-                    label=p, color=POLICY_COLORS[p])
+            ax.plot(xs, ys, marker="o", linewidth=2.2, label=p, color=POLICY_COLORS[p])
 
         ax.set_xlabel("Simulation tick")
         if ax_idx == 0:
@@ -620,8 +677,10 @@ def plot_evacuation_curves(df: pd.DataFrame, outpath: Path,
 # 5. Plain-text summary output
 # --------------------------------------------------------------------
 
-def build_summary_text(df: pd.DataFrame, tables: dict,
-                       anovas: dict, tukey: dict) -> str:
+
+def build_summary_text(
+    df: pd.DataFrame, tables: dict, anovas: dict, tukey: dict
+) -> str:
     """Build a human-readable summary suitable for copy into the report.
 
     Uses ASCII-only characters so it prints correctly on Windows
@@ -631,10 +690,12 @@ def build_summary_text(df: pd.DataFrame, tables: dict,
     out.append("=" * 70)
     out.append("EVACUATION EXPERIMENT ANALYSIS SUMMARY")
     out.append(f"Total runs analysed: {len(df)}")
-    out.append(f"Maps: {df['map_name'].nunique()} | "
-               f"Policies: {df['policy'].nunique()} | "
-               f"Crowd sizes: {df['n_civilians'].nunique()} | "
-               f"Fire positions: {df['fire_position'].nunique()}")
+    out.append(
+        f"Maps: {df['map_name'].nunique()} | "
+        f"Policies: {df['policy'].nunique()} | "
+        f"Crowd sizes: {df['n_civilians'].nunique()} | "
+        f"Fire positions: {df['fire_position'].nunique()}"
+    )
     out.append("=" * 70 + "\n")
 
     # Per-policy overall.
@@ -668,9 +729,11 @@ def build_summary_text(df: pd.DataFrame, tables: dict,
     tk = tukey.get("survival_rate")
     if isinstance(tk, pd.DataFrame) and "error" not in tk.columns:
         for _, r in tk.iterrows():
-            flag = "***" if r["p_adj"] < 0.001 else \
-                   "**"  if r["p_adj"] < 0.01 else \
-                   "*"   if r["p_adj"] < 0.05 else " "
+            flag = (
+                "***"
+                if r["p_adj"] < 0.001
+                else "**" if r["p_adj"] < 0.01 else "*" if r["p_adj"] < 0.05 else " "
+            )
             d_val = r["cohens_d"]
             out.append(
                 f"  {r['group1']:<8} vs {r['group2']:<8}  "
@@ -717,8 +780,10 @@ def build_summary_text(df: pd.DataFrame, tables: dict,
     for m in heat.columns:
         best = heat[m].idxmax()
         worst = heat[m].idxmin()
-        out.append(f"  {m}: best={best} ({heat[m][best]:.3f}), "
-                   f"worst={worst} ({heat[m][worst]:.3f})")
+        out.append(
+            f"  {m}: best={best} ({heat[m][best]:.3f}), "
+            f"worst={worst} ({heat[m][worst]:.3f})"
+        )
     out.append("")
 
     out.append("=" * 70)
@@ -734,12 +799,17 @@ def build_summary_text(df: pd.DataFrame, tables: dict,
 # Main
 # --------------------------------------------------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Analyse evacuation experiment results")
-    parser.add_argument("--input", default="results/experiment_results.csv",
-                        help="Path to the input CSV")
-    parser.add_argument("--output", default="results/analysis",
-                        help="Output directory")
+    parser = argparse.ArgumentParser(
+        description="Analyse evacuation experiment results"
+    )
+    parser.add_argument(
+        "--input",
+        default="results/experiment_results.csv",
+        help="Path to the input CSV",
+    )
+    parser.add_argument("--output", default="results/analysis", help="Output directory")
     args = parser.parse_args()
 
     # Add project root to the import path.
@@ -797,8 +867,10 @@ def main():
             f.write(f"  Significant at p<0.05: {anova['significant']}\n")
             f.write("  Group stats:\n")
             for name, s in anova["groups"].items():
-                f.write(f"    {name:<8}  n={s['n']:<5}  "
-                        f"mean={s['mean']:.4f}  SD={s['std']:.4f}\n")
+                f.write(
+                    f"    {name:<8}  n={s['n']:<5}  "
+                    f"mean={s['mean']:.4f}  SD={s['std']:.4f}\n"
+                )
             f.write("\n")
         f.write("\n" + "=" * 70 + "\n")
         f.write("TWO-WAY ANOVA RESULTS\n")
@@ -826,9 +898,7 @@ def main():
         df, "router", "sweeper", metric="survival_rate"
     )
     if not per_map_rs.empty and "error" not in per_map_rs.columns:
-        per_map_rs.to_csv(
-            out_dir / "per_map_router_vs_sweeper_paired.csv", index=False
-        )
+        per_map_rs.to_csv(out_dir / "per_map_router_vs_sweeper_paired.csv", index=False)
         print("  Saved per_map_router_vs_sweeper_paired.csv")
     else:
         print("  (per-map paired comparison produced no rows)")
@@ -838,9 +908,11 @@ def main():
     # with a negligible interaction, justifying the decision to
     # collapse across it in the main analysis.
     anova_parts = []
-    for f1, f2 in [("policy", "map_type"),
-                    ("policy", "n_civilians"),
-                    ("policy", "fire_position")]:
+    for f1, f2 in [
+        ("policy", "map_type"),
+        ("policy", "n_civilians"),
+        ("policy", "fire_position"),
+    ]:
         table = two_way_anova_with_partial_eta(df, "survival_rate", f1, f2)
         if not isinstance(table, pd.DataFrame) or "error" in table.columns:
             continue
@@ -860,7 +932,8 @@ def main():
     # If the interaction's partial eta2 drops substantially when those
     # maps are excluded, the claim holds.
     decomp = interaction_decomposition(
-        df, "survival_rate",
+        df,
+        "survival_rate",
         maps_to_exclude=["bottleneck_A", "bottleneck_D"],
     )
     if isinstance(decomp, pd.DataFrame) and "error" not in decomp.columns:
@@ -871,12 +944,16 @@ def main():
 
     # 4. Visualisations.
     print("\nGenerating figures...")
-    plot_boxplot_policy(df, "survival_rate", figs_dir / "01_boxplot_policy.png",
-                        ylabel="Survival rate")
+    plot_boxplot_policy(
+        df, "survival_rate", figs_dir / "01_boxplot_policy.png", ylabel="Survival rate"
+    )
     print("  01_boxplot_policy.png")
-    plot_boxplot_by_map_type(df, "survival_rate",
-                              figs_dir / "02_boxplot_by_map_type.png",
-                              ylabel="Survival rate")
+    plot_boxplot_by_map_type(
+        df,
+        "survival_rate",
+        figs_dir / "02_boxplot_by_map_type.png",
+        ylabel="Survival rate",
+    )
     print("  02_boxplot_by_map_type.png")
     plot_line_crowd_vs_survival(df, figs_dir / "03_line_crowd_vs_survival.png")
     print("  03_line_crowd_vs_survival.png")
@@ -887,15 +964,19 @@ def main():
 
     # Evacuation curves require the bin columns to be present.
     if all(c in df.columns for c in BIN_COLUMNS):
-        plot_evacuation_curves(df, figs_dir / "06_evacuation_curves.png",
-                                by_map_type=False)
+        plot_evacuation_curves(
+            df, figs_dir / "06_evacuation_curves.png", by_map_type=False
+        )
         print("  06_evacuation_curves.png")
-        plot_evacuation_curves(df, figs_dir / "07_evacuation_curves_by_map_type.png",
-                                by_map_type=True)
+        plot_evacuation_curves(
+            df, figs_dir / "07_evacuation_curves_by_map_type.png", by_map_type=True
+        )
         print("  07_evacuation_curves_by_map_type.png")
     else:
-        print("  (Evacuation curves skipped; bin columns missing from CSV. "
-              "Re-run experiments with the updated runner.)")
+        print(
+            "  (Evacuation curves skipped; bin columns missing from CSV. "
+            "Re-run experiments with the updated runner.)"
+        )
 
     # 5. Plain-text summary.
     print("\nBuilding summary text...")

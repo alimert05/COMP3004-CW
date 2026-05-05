@@ -45,7 +45,6 @@ sys.path.insert(0, PROJECT_ROOT)
 from config import SimConfig
 from evacsim.simulation import run_single
 
-
 # -- Experimental design --
 
 MAPS = [

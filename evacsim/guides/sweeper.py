@@ -6,6 +6,7 @@ returning to its patrol route. The policy is purely reactive: every
 decision is based on the current grid state with no forward prediction
 or congestion inference.
 """
+
 import math
 import numpy as np
 from evacsim.environment import Environment, CellType
@@ -65,12 +66,10 @@ class SweeperBlackboard:
     WORKLOAD_EXPIRY = 10
 
     def __init__(self):
-        self._positions = {}        # guide_id -> (np.array pos, tick)
-        self._patrol_targets = {}   # guide_id -> (np.array pos, tick)
-        self._cleared_cells = []    # list of np.array world positions
-        self._workload = {}         # guide_id -> (count, guide_ref, tick)
-
-    # -- Positions (diagnostic and symmetry channel) --
+        self._positions = {}  # guide_id -> (np.array pos, tick)
+        self._patrol_targets = {}  # guide_id -> (np.array pos, tick)
+        self._cleared_cells = []  # list of np.array world positions
+        self._workload = {}  # guide_id -> (count, guide_ref, tick)
 
     def update_position(self, guide_id, position, tick):
         """Record the current position of a Sweeper. Called every tick."""
@@ -92,16 +91,16 @@ class SweeperBlackboard:
             result.append(pos)
         return result
 
-    # -- Patrol targets (active gating channel) --
-
     def claim_patrol_target(self, guide_id, position, tick):
         """Publish the cell this Sweeper is walking toward."""
         self._patrol_targets[guide_id] = (
-            np.array(position, dtype=float), tick,
+            np.array(position, dtype=float),
+            tick,
         )
 
-    def is_target_claimed(self, position, current_tick,
-                          exclude_guide=None, radius=20.0):
+    def is_target_claimed(
+        self, position, current_tick, exclude_guide=None, radius=20.0
+    ):
         """Return True if any other guide has a fresh claim within radius
         world units. Lazy-cleans stale entries on the fly.
         """
@@ -115,8 +114,6 @@ class SweeperBlackboard:
             if np.linalg.norm(pos - target) < radius:
                 return True
         return False
-
-    # -- Cleared cells (persistent coverage channel) --
 
     def post_cleared(self, position):
         """Post a cell as cleared. Persistent for the simulation (no TTL):
@@ -134,8 +131,6 @@ class SweeperBlackboard:
             if np.linalg.norm(pos - target) < radius:
                 return True
         return False
-
-    # -- Workload (reallocation signal) --
 
     def update_workload(self, guide_id, count, guide, tick):
         """Publish uncleared patrol count and a self-reference so peers
@@ -386,7 +381,9 @@ class SweeperGuide(Guide):
             self._waypoints = bfs_path(env, self.pos, self._patrol_route[0])
             # Publish the initial target claim so peers see it from tick 0.
             self._blackboard.claim_patrol_target(
-                self._guide_id, self._patrol_route[0], self._tick,
+                self._guide_id,
+                self._patrol_route[0],
+                self._tick,
             )
 
     def _effective_max_group(self) -> int:
@@ -463,13 +460,17 @@ class SweeperGuide(Guide):
         # the busiest Sweeper without iterating a class-level registry.
         if self._patrol_route:
             uncleared = sum(
-                1 for i in range(len(self._patrol_route))
+                1
+                for i in range(len(self._patrol_route))
                 if i not in self._cleared_points
             )
         else:
             uncleared = 0
         self._blackboard.update_workload(
-            self._guide_id, uncleared, self, self._tick,
+            self._guide_id,
+            uncleared,
+            self,
+            self._tick,
         )
 
         self._clean_group()
@@ -485,8 +486,6 @@ class SweeperGuide(Guide):
             self._do_releasing(env)
         elif self._phase == self.RETURNING:
             self._do_returning(env, smoke, civilians)
-
-    # -- Phase behaviours --
 
     def _do_collecting(self, env, smoke, civilians):
         """Walk the patrol route, recruit civilians, escort if full or in danger."""
@@ -686,8 +685,6 @@ class SweeperGuide(Guide):
         else:
             self._follow_path(env)
 
-    # -- Recruitment and release --
-
     def _recruit_nearby(self, env, smoke, civilians):
         """Recruit civilians within visual range, requiring line of sight.
 
@@ -716,8 +713,7 @@ class SweeperGuide(Guide):
             # Skip QUEUED civilians: they are already at an exit and
             # about to escape. Pulling them out of the queue would be
             # unrealistic and creates an asymmetry with Router.
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD,
-                             FOLLOWING_GUIDE, QUEUED):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
@@ -756,9 +752,7 @@ class SweeperGuide(Guide):
         )
 
         for civ in civilians:
-            # Skip QUEUED to avoid pulling civilians out of exit queues.
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD,
-                             FOLLOWING_GUIDE, QUEUED):
+            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
                 continue
             if civ.assigned_guide is not None:
                 continue
@@ -787,7 +781,6 @@ class SweeperGuide(Guide):
             MOVING_TO_EXIT,
             ESCAPED,
             DEAD,
-            IDLE,
             FOLLOWING_GUIDE,
         )
 
@@ -853,16 +846,18 @@ class SweeperGuide(Guide):
             # grid. civilian_density stays None: density-aware routing
             # is Router-only.
             dij_path = dijkstra_congestion_path(
-                env, self.pos, np.array(best_exit),
-                fire_grid=fg, smoke_grid=sg,
+                env,
+                self.pos,
+                np.array(best_exit),
+                fire_grid=fg,
+                smoke_grid=sg,
                 civilian_density=None,
             )
             dij_safe = True
             if dij_path and danger is not None:
                 for wp in dij_path:
                     wr, wc = env.world_to_grid(wp[0], wp[1])
-                    if (0 <= wr < danger.shape[0]
-                            and 0 <= wc < danger.shape[1]):
+                    if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                         if danger[wr, wc] > 0.3:
                             dij_safe = False
                             break
@@ -870,7 +865,9 @@ class SweeperGuide(Guide):
                 self._waypoints = dij_path
             else:
                 self._waypoints = bfs_path(
-                    env, self.pos, np.array(best_exit),
+                    env,
+                    self.pos,
+                    np.array(best_exit),
                     fire_grid=danger,
                 )
 
@@ -918,7 +915,8 @@ class SweeperGuide(Guide):
         # signal may be up to WORKLOAD_EXPIRY ticks stale, so the peer's
         # current uncleared count could be lower than reported.
         peer_live_uncleared = sum(
-            1 for i in range(len(best_peer._patrol_route))
+            1
+            for i in range(len(best_peer._patrol_route))
             if i not in best_peer._cleared_points
         )
         if peer_live_uncleared < 3:
@@ -926,7 +924,8 @@ class SweeperGuide(Guide):
 
         # Take half of the peer's uncleared points so both guides keep working.
         peer_uncleared_indices = [
-            i for i in range(len(best_peer._patrol_route))
+            i
+            for i in range(len(best_peer._patrol_route))
             if i not in best_peer._cleared_points
         ]
         n_take = max(1, len(peer_uncleared_indices) // 2)
@@ -970,16 +969,18 @@ class SweeperGuide(Guide):
         if self._group:
             # With civilians in tow, use the three-layer cascade.
             dij_path = dijkstra_congestion_path(
-                env, self.pos, self._patrol_route[0],
-                fire_grid=fg, smoke_grid=sg,
+                env,
+                self.pos,
+                self._patrol_route[0],
+                fire_grid=fg,
+                smoke_grid=sg,
                 civilian_density=None,
             )
             dij_safe = True
             if dij_path and danger is not None:
                 for wp in dij_path:
                     wr, wc = env.world_to_grid(wp[0], wp[1])
-                    if (0 <= wr < danger.shape[0]
-                            and 0 <= wc < danger.shape[1]):
+                    if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                         if danger[wr, wc] > 0.3:
                             dij_safe = False
                             break
@@ -987,7 +988,9 @@ class SweeperGuide(Guide):
                 self._waypoints = dij_path
             else:
                 self._waypoints = bfs_path(
-                    env, self.pos, self._patrol_route[0],
+                    env,
+                    self.pos,
+                    self._patrol_route[0],
                     fire_grid=danger,
                 )
         else:
@@ -999,7 +1002,9 @@ class SweeperGuide(Guide):
         # Publish the adopted territory's first target so other peers
         # treat it as claimed by this guide going forward.
         self._blackboard.claim_patrol_target(
-            self._guide_id, self._patrol_route[0], self._tick,
+            self._guide_id,
+            self._patrol_route[0],
+            self._tick,
         )
         return True
 
@@ -1027,10 +1032,7 @@ class SweeperGuide(Guide):
             # Full cycle completed. Try territory reallocation before
             # resetting; if a peer's points can be adopted, do that
             # instead of re-walking already-empty territory.
-            if (
-                self._patrol_idx == self._cycle_start_idx
-                and not cycle_restarted
-            ):
+            if self._patrol_idx == self._cycle_start_idx and not cycle_restarted:
                 if self._try_reallocate_to_peer(env):
                     return  # Waypoints already set by reallocation.
                 self._cleared_points.clear()
@@ -1053,7 +1055,9 @@ class SweeperGuide(Guide):
                 # TTL 30 ticks (TARGET_EXPIRY) auto-recovers from silent
                 # peer death.
                 if self._blackboard.is_target_claimed(
-                    target, self._tick, exclude_guide=self._guide_id,
+                    target,
+                    self._tick,
+                    exclude_guide=self._guide_id,
                 ):
                     continue
 
@@ -1114,16 +1118,18 @@ class SweeperGuide(Guide):
             # With civilians in tow, use the three-layer cascade.
             target = self._patrol_route[self._patrol_idx]
             dij_path = dijkstra_congestion_path(
-                env, self.pos, target,
-                fire_grid=fg, smoke_grid=sg,
+                env,
+                self.pos,
+                target,
+                fire_grid=fg,
+                smoke_grid=sg,
                 civilian_density=None,
             )
             dij_safe = True
             if dij_path and danger is not None:
                 for wp in dij_path:
                     wr, wc = env.world_to_grid(wp[0], wp[1])
-                    if (0 <= wr < danger.shape[0]
-                            and 0 <= wc < danger.shape[1]):
+                    if 0 <= wr < danger.shape[0] and 0 <= wc < danger.shape[1]:
                         if danger[wr, wc] > 0.3:
                             dij_safe = False
                             break
@@ -1131,20 +1137,27 @@ class SweeperGuide(Guide):
                 self._waypoints = dij_path
             else:
                 self._waypoints = bfs_path(
-                    env, self.pos, target, fire_grid=danger,
+                    env,
+                    self.pos,
+                    target,
+                    fire_grid=danger,
                 )
         else:
             # Solo movement: BFS is fast and sufficient.
             self._waypoints = bfs_path(
-                env, self.pos,
+                env,
+                self.pos,
                 self._patrol_route[self._patrol_idx],
                 fire_grid=danger,
             )
 
 
 def spawn_sweeper_guides(
-    env: Environment, n_guides: int, speed: float = 2.0, seed: int = 77,
-    n_civilians: int = 100
+    env: Environment,
+    n_guides: int,
+    speed: float = 2.0,
+    seed: int = 77,
+    n_civilians: int = 100,
 ) -> list[SweeperGuide]:
     """Spawn n_guides Sweepers from exit positions and split coverage.
 
@@ -1203,9 +1216,17 @@ def spawn_sweeper_guides(
         pts = territories[i] if territories[i] else all_points
         # Order farthest first so the guide moves deep into the building.
         pts_sorted = sorted(pts, key=lambda p: -np.linalg.norm(p - np.array([ex, ey])))
-        guide = SweeperGuide(ex, ey, speed, env, rng, patrol_points=pts_sorted,
-                             n_civilians=n_civilians, n_guides=n_guides,
-                             blackboard=blackboard)
+        guide = SweeperGuide(
+            ex,
+            ey,
+            speed,
+            env,
+            rng,
+            patrol_points=pts_sorted,
+            n_civilians=n_civilians,
+            n_guides=n_guides,
+            blackboard=blackboard,
+        )
         guides.append(guide)
 
     return guides
