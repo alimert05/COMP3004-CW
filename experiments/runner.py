@@ -249,7 +249,7 @@ def run_experiment(
 
     start = time.time()
     completed = 0
-    results = []  # Retained for API compatibility (returned to caller).
+    results = []  # returned to caller
 
     # Open the CSV once, write the header, then stream each row.
     with open(output_file, "w", newline="", encoding="utf-8") as csv_f:

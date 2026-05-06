@@ -40,7 +40,7 @@ except ImportError as e:
     print("Install with:  pip install pandas numpy matplotlib scipy")
     sys.exit(1)
 
-# -- Optional: statsmodels for Tukey HSD and two-way ANOVA --
+# Optional: statsmodels for Tukey HSD and two-way ANOVA
 try:
     import statsmodels.api as sm
     from statsmodels.formula.api import ols
@@ -54,7 +54,7 @@ except ImportError:
         "be skipped.\n         Install with:  pip install statsmodels"
     )
 
-# -- Optional: seaborn for nicer plot styling --
+# seaborn for nicer plot styling
 try:
     import seaborn as sns
 
@@ -64,7 +64,7 @@ except ImportError:
     HAS_SEABORN = False
 
 
-# -- Constants --
+# Constants
 POLICY_ORDER = ["none", "beacon", "sweeper", "router"]
 POLICY_COLORS = {
     "none": "#8E8E8E",
@@ -75,10 +75,7 @@ POLICY_COLORS = {
 BIN_EDGES = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 BIN_COLUMNS = [f"escaped_{lo}_{hi}" for lo, hi in zip(BIN_EDGES[:-1], BIN_EDGES[1:])]
 
-
-# --------------------------------------------------------------------
 # 1. Data loading and preprocessing
-# --------------------------------------------------------------------
 
 
 def load_data(csv_path: str) -> pd.DataFrame:
@@ -120,9 +117,7 @@ def load_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-# --------------------------------------------------------------------
 # 2. Descriptive statistics
-# --------------------------------------------------------------------
 
 
 def _ci95(series: pd.Series) -> float:
@@ -204,9 +199,7 @@ def per_condition_summary(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-# --------------------------------------------------------------------
 # 3. Inferential statistics
-# --------------------------------------------------------------------
 
 
 def _cohens_d(x: np.ndarray, y: np.ndarray) -> float:
@@ -458,9 +451,7 @@ def interaction_decomposition(
         return pd.DataFrame({"error": [str(e)]})
 
 
-# --------------------------------------------------------------------
 # 4. Visualisations
-# --------------------------------------------------------------------
 
 
 def _setup_fig(figsize=(10, 6)):
@@ -673,9 +664,7 @@ def plot_evacuation_curves(df: pd.DataFrame, outpath: Path, by_map_type: bool = 
     plt.close()
 
 
-# --------------------------------------------------------------------
 # 5. Plain-text summary output
-# --------------------------------------------------------------------
 
 
 def build_summary_text(
@@ -793,11 +782,6 @@ def build_summary_text(
     out.append("=" * 70)
 
     return "\n".join(out)
-
-
-# --------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------
 
 
 def main():
