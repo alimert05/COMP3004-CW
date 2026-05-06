@@ -11,6 +11,7 @@ These primitives are stateless and pure: each call takes its inputs and
 returns a result without mutating any global state. They are imported by
 several guide policies and by the civilian module.
 """
+import heapq
 import numpy as np
 from collections import deque
 from evacsim.environment import Environment, CellType
@@ -103,8 +104,6 @@ def dijkstra_congestion_path(
     civilian_density is a 2D numpy array indexed by (row, col) holding
     blurred civilian counts (see build_density_grid).
     """
-    import heapq
-
     sr, sc = env.world_to_grid(start_world[0], start_world[1])
     gr, gc = env.world_to_grid(goal_world[0], goal_world[1])
     rows, cols = env.grid.shape

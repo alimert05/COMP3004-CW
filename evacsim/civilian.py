@@ -20,10 +20,11 @@ when its potency reaches zero.
 """
 
 import numpy as np
+from collections import deque
+
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
-from evacsim.guide import bfs_path
 
 # -- States --
 IDLE = 0  # Pre-evacuation: at desk, unaware of the emergency.
@@ -37,6 +38,11 @@ MOVING_TO_EXIT = 7  # Following a BFS path to a known exit.
 QUEUED = 8  # At the exit, waiting in line to escape.
 ESCAPED = 9
 DEAD = 10
+
+# Imported after the state constants so that guides.common and the
+# guide policies (which import these states) see them defined when
+# their own module bodies run as part of this import chain.
+from evacsim.guides.common import bfs_path
 
 
 class Civilian:
@@ -158,7 +164,7 @@ class Civilian:
 
             # _do_random_walk sets self.vel; _move applies wall
             # collision and inter-civilian separation.
-            self._do_random_walk(env, idle_speed, local_smoke)
+            self._do_random_walk(idle_speed, local_smoke)
             self._move(env, idle_speed, all_civilians)
             return
 
@@ -362,7 +368,7 @@ class Civilian:
             else:
                 # Rule 1: random walk.
                 # Rule 3: disorientation in smoke.
-                self._do_random_walk(env, speed, local_smoke)
+                self._do_random_walk(speed, local_smoke)
 
         # Apply movement.
         self._move(env, speed, all_civilians)
@@ -417,7 +423,7 @@ class Civilian:
     # Movement rules
     # ----------------------------------------------------------------
 
-    def _do_random_walk(self, env, speed, smoke_density):
+    def _do_random_walk(self, speed, smoke_density):
         """Rules 1 and 3: cardinal random walk with smoke-induced disorientation.
 
         Pick a cardinal direction and walk until a wall. In smoke,
@@ -784,8 +790,6 @@ class Civilian:
         A corridor cell is one with at least a six-cell straight run
         in some cardinal direction. Searches up to 25 cells.
         """
-        from collections import deque
-
         gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
         rows, cols = env.grid.shape
 

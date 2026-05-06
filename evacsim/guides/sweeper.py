@@ -176,13 +176,6 @@ class SweeperBlackboard:
         self._patrol_targets.pop(guide_id, None)
         self._workload.pop(guide_id, None)
 
-    def reset(self):
-        """Clear all blackboard state for a new simulation."""
-        self._positions.clear()
-        self._patrol_targets.clear()
-        self._cleared_cells.clear()
-        self._workload.clear()
-
 
 def _find_patrol_points(env: Environment):
     """Build the patrol-point list using room detection plus a grid scan.
@@ -445,11 +438,11 @@ class SweeperGuide(Guide):
         self._tick += 1
 
         if not self.alive:
-            self._release_group_no_exit()
+            self._release_group_wandering()
             return
 
         if self._do_self_evacuation(env):
-            self._release_group_no_exit()
+            self._release_group_wandering()
             return
 
         # Publish current position to the shared blackboard (diagnostic
@@ -485,7 +478,7 @@ class SweeperGuide(Guide):
         elif self._phase == self.RELEASING:
             self._do_releasing(env)
         elif self._phase == self.RETURNING:
-            self._do_returning(env, smoke, civilians)
+            self._do_returning(env, smoke)
 
     def _do_collecting(self, env, smoke, civilians):
         """Walk the patrol route, recruit civilians, escort if full or in danger."""
@@ -596,7 +589,7 @@ class SweeperGuide(Guide):
             self._start_escort(env)
 
         # Pick up any civilian along the way (no group limit during escort).
-        self._recruit_nearby_escort(env, smoke, civilians)
+        self._recruit_nearby_unlimited(env, smoke, civilians)
         if not self._waypoints:
             if self._escort_exit is not None:
                 dist = np.linalg.norm(self.pos - np.array(self._escort_exit))
@@ -610,44 +603,12 @@ class SweeperGuide(Guide):
         else:
             self._follow_path(env)
 
-    def _do_releasing(self, env):
-        """Stand at the exit and direct group members through it.
+    def _on_release_complete(self):
+        """Sweeper transitions to RETURNING and walks back to its territory."""
+        self._phase = self.RETURNING
+        self._advance_patrol(self.env)
 
-        Civilians within five cells of the exit or three cells of the
-        guide receive a forced exit target. After max_wait ticks any
-        remaining group members are forced through and the guide
-        returns to patrol.
-        """
-        from evacsim.civilian import FOLLOWING_GUIDE
-
-        self.vel = np.zeros(2)
-        self._release_wait += 1
-
-        # Active release: forward each civilian to the exit.
-        still = []
-        for civ in self._group:
-            if civ.state != FOLLOWING_GUIDE:
-                continue
-            dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
-            dist_guide = np.linalg.norm(civ.pos - self.pos)
-            if dist_exit < env.cell_size * 5 or dist_guide < env.cell_size * 3:
-                civ._set_exit_target_force(env, self._escort_exit)
-            else:
-                still.append(civ)
-        self._group = still
-
-        # End the release phase when the group is empty or on timeout.
-        if not self._group or self._release_wait >= self._release_max_wait:
-            # On timeout, give stragglers an exit target rather than
-            # leaving them lost.
-            for civ in self._group:
-                if civ.state == FOLLOWING_GUIDE:
-                    civ._set_exit_target_force(env, self._escort_exit)
-            self._group.clear()
-            self._phase = self.RETURNING
-            self._advance_patrol(env)
-
-    def _do_returning(self, env, smoke, civilians):
+    def _do_returning(self, env, smoke):
         """Walk back along the patrol route to resume collecting."""
         if len(self._group) >= self._effective_max_group():
             self._start_escort(env)
@@ -684,116 +645,6 @@ class SweeperGuide(Guide):
             self.vel = np.zeros(2)
         else:
             self._follow_path(env)
-
-    def _recruit_nearby(self, env, smoke, civilians):
-        """Recruit civilians within visual range, requiring line of sight.
-
-        Walls block recruitment. Civilians who are already on the way to
-        an exit, queueing, or attached to another guide are skipped.
-        IDLE and REACTING civilians have their reaction shortened so
-        they will be ready for recruitment on a later tick.
-        """
-        if len(self._group) >= self._effective_max_group():
-            return
-        radius = self.get_visual_recruit_radius(smoke)
-
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            IDLE,
-            REACTING,
-            FOLLOWING_GUIDE,
-            QUEUED,
-        )
-
-        for civ in civilians:
-            if len(self._group) >= self._effective_max_group():
-                break
-            # Skip QUEUED civilians: they are already at an exit and
-            # about to escape. Pulling them out of the queue would be
-            # unrealistic and creates an asymmetry with Router.
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                # Wake IDLE or REACTING civilians.
-                if civ.state == IDLE:
-                    civ.state = REACTING
-                    civ._reaction_counter = 0
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    continue  # Wait for the reaction to finish.
-                elif civ.state == REACTING:
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    continue  # Still reacting.
-                else:
-                    self._group.append(civ)
-                    civ.assigned_guide = self
-                    civ.state = FOLLOWING_GUIDE
-
-    def _recruit_nearby_escort(self, env, smoke, civilians):
-        """Recruit any civilian along the escort route without a group limit.
-
-        Same selection rules as _recruit_nearby (visual range, line of
-        sight, skip QUEUED) but without the maximum-group cap.
-        """
-        radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            IDLE,
-            REACTING,
-            FOLLOWING_GUIDE,
-            QUEUED,
-        )
-
-        for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                if civ.state == IDLE:
-                    civ.state = REACTING
-                    civ._reaction_counter = 0
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                elif civ.state == REACTING:
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    continue
-                else:
-                    self._group.append(civ)
-                    civ.assigned_guide = self
-                    civ.state = FOLLOWING_GUIDE
-
-    def _count_recruitable(self, env, smoke, civilians):
-        """Count civilians actually recruitable by _recruit_nearby.
-
-        Uses identical visual-range and line-of-sight checks so the
-        count never reports false positives.
-        """
-        radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            FOLLOWING_GUIDE,
-        )
-
-        count = 0
-        for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                count += 1
-        return count
 
     def _start_escort(self, env):
         """Switch to ESCORTING and plan a path to the nearest safe exit.
@@ -870,29 +721,6 @@ class SweeperGuide(Guide):
                     np.array(best_exit),
                     fire_grid=danger,
                 )
-
-    def _release_group_no_exit(self):
-        """Release the group when the guide dies or self-evacuates.
-
-        Civilians attached to the group are returned to WANDERING so
-        they can resume autonomous evacuation. The guide's live-state
-        entries are also released from the shared blackboard so peers
-        see immediate cleanup rather than waiting for TTL expiry.
-        """
-        from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
-
-        for civ in self._group:
-            if civ.state == FOLLOWING_GUIDE:
-                civ.assigned_guide = None
-                civ.state = WANDERING
-        self._group.clear()
-        self._blackboard.release(self._guide_id)
-
-    def _clean_group(self):
-        """Remove escaped or dead civilians from the group list."""
-        from evacsim.civilian import ESCAPED, DEAD
-
-        self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
     def _try_reallocate_to_peer(self, env):
         """Adopt half of the busiest peer's uncleared patrol points.

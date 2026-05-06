@@ -21,7 +21,7 @@ from evacsim.fire import FireSystem
 from evacsim.civilian import (
     spawn_civilians, IDLE, REACTING, QUEUED, ESCAPED, DEAD
 )
-from evacsim.guide import (
+from evacsim.guides import (
     spawn_beacon_guides, spawn_sweeper_guides, spawn_router_guides
 )
 from evacsim.metrics import MetricsCollector
@@ -137,8 +137,6 @@ class Simulation:
         cap stay in QUEUED and try again next tick. Queued civilians
         still take potency damage and can die in line.
         """
-        import numpy as np
-
         throughput = self.config.exit_throughput
 
         # Group queued civilians by their target exit.

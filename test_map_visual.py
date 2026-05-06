@@ -10,6 +10,7 @@ Keyboard controls:
 """
 
 import sys
+import numpy as np
 import pygame
 from PIL import Image
 from config import (
@@ -37,7 +38,12 @@ from evacsim.civilian import (
     ESCAPED,
     DEAD,
 )
-from evacsim.guide import spawn_beacon_guides, spawn_sweeper_guides, spawn_router_guides
+from evacsim.guides import (
+    BeaconGuide,
+    spawn_beacon_guides,
+    spawn_sweeper_guides,
+    spawn_router_guides,
+)
 
 # --------------------------------------------------------------------
 # Step 1: load the map
@@ -214,8 +220,6 @@ while running:
             civ.update(env, smoke_system, fire_system, civilians)
 
         # Exit-queue processing: at most two civilians per exit per tick.
-        import numpy as np
-
         EXIT_THROUGHPUT = 2
         exit_queues = {}
         for i, civ in enumerate(civilians):
@@ -327,8 +331,6 @@ while running:
 
         # Radius circle, different visual for each policy type.
         if not guide._self_evacuating:
-            from evacsim.guide import BeaconGuide
-
             if isinstance(guide, BeaconGuide):
                 # Beacon: broadcast radius (sound, passes through walls).
                 brad = int(guide.get_broadcast_radius(smoke_system) * SCALE)

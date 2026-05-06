@@ -18,6 +18,19 @@ score, preventing pile-ups at the same exit).
 import math
 import numpy as np
 from evacsim.environment import CellType
+from evacsim.civilian import (
+    MOVING_TO_EXIT,
+    ESCAPED,
+    DEAD,
+    IDLE,
+    REACTING,
+    FOLLOWING_GUIDE,
+    QUEUED,
+    WANDERING,
+    FOLLOWING,
+    FLEEING_ROOM,
+    WALL_FOLLOWING,
+)
 from evacsim.guides.base import Guide
 from evacsim.guides.common import (
     bfs_path,
@@ -163,12 +176,6 @@ class RouterBlackboard:
                 total += size
         return total
 
-    def reset(self):
-        """Clear all blackboard state for a new simulation."""
-        self._claims.clear()
-        self._positions.clear()
-        self._exit_claims.clear()
-
 
 class RouterGuide(Guide):
     """Hybrid reactive-deliberative guide that uses congestion-aware routing.
@@ -190,8 +197,7 @@ class RouterGuide(Guide):
            escort), and re-evaluating the exit choice every twenty
            ticks if a substantially better option appears.
         5. RELEASING. Stand at the exit and forward civilians into the
-           queue.
-        6. SCAN AGAIN.
+           queue. Returns to SCANNING when the group is empty.
 
     Architectural elements that distinguish this policy from the
     others: a global hotspot scan rather than a fixed territory, a
@@ -204,7 +210,6 @@ class RouterGuide(Guide):
     COLLECTING = "collecting"
     ESCORTING = "escorting"
     RELEASING = "releasing"
-    RETURNING = "returning"
 
     def __init__(
         self,
@@ -389,14 +394,12 @@ class RouterGuide(Guide):
         elif self._phase == self.ESCORTING:
             self._do_escorting(env, smoke, civilians)
         elif self._phase == self.RELEASING:
-            self._do_releasing(env, smoke)
-        elif self._phase == self.RETURNING:
-            self._do_returning(env, smoke, civilians)
+            self._do_releasing(env)
 
     def _do_scanning(self, env, smoke, civilians):
         # If the guide is carrying civilians and danger is nearby,
         # escort immediately rather than wait for min_group. Same
-        # pattern as _do_collecting and _do_returning.
+        # pattern as _do_collecting.
         if self._group:
             danger = False
             sg = getattr(self, "_smoke_grid", None)
@@ -421,7 +424,7 @@ class RouterGuide(Guide):
                         danger = True
                         break
             if danger:
-                self._start_escort(env, smoke, civilians)
+                self._start_escort(env, smoke)
                 return
 
         if self._waypoints:
@@ -429,7 +432,7 @@ class RouterGuide(Guide):
             self._recruit_nearby(env, smoke, civilians)
             # Reached max_group while walking. Escort immediately.
             if len(self._group) >= self._effective_max_group():
-                self._start_escort(env, smoke, civilians)
+                self._start_escort(env, smoke)
             return
         self.vel = np.zeros(2)
         # Scan for a congestion hotspot.
@@ -441,7 +444,7 @@ class RouterGuide(Guide):
             self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=danger)
             self._phase = self.RESPONDING
         elif len(self._group) >= self._min_group:
-            self._start_escort(env, smoke, civilians)
+            self._start_escort(env, smoke)
         elif not self._waypoints:
             # No hotspot found. Two cases:
             # 1. Safety net: civilians are still attached to this guide.
@@ -450,15 +453,6 @@ class RouterGuide(Guide):
             #    passengers attached to an idle guide.
             # 2. Mission complete: nobody anywhere needs help.
             #    Self-evacuate through the nearest exit.
-            from evacsim.civilian import (
-                IDLE,
-                REACTING,
-                WANDERING,
-                FOLLOWING,
-                FLEEING_ROOM,
-                WALL_FOLLOWING,
-            )
-
             NEEDS_HELP = (
                 IDLE,
                 REACTING,
@@ -469,7 +463,7 @@ class RouterGuide(Guide):
             )
 
             if self._group:
-                self._start_escort(env, smoke, civilians)
+                self._start_escort(env, smoke)
                 return
 
             any_needs_help = any(c.state in NEEDS_HELP for c in civilians)
@@ -483,7 +477,7 @@ class RouterGuide(Guide):
     def _do_responding(self, env, smoke=None, civilians=None):
         # Reached max_group while walking to the hotspot. Escort now.
         if len(self._group) >= self._effective_max_group():
-            self._start_escort(env, smoke, civilians)
+            self._start_escort(env, smoke)
             return
 
         # Same danger pattern as the other phases.
@@ -511,7 +505,7 @@ class RouterGuide(Guide):
                         danger = True
                         break
             if danger:
-                self._start_escort(env, smoke, civilians)
+                self._start_escort(env, smoke)
                 return
 
         if not self._waypoints:
@@ -536,7 +530,7 @@ class RouterGuide(Guide):
                 self._waypoints.clear()
                 if self._group:
                     # With civilians, escort to safety instead of rescanning.
-                    self._start_escort(env, smoke, civilians)
+                    self._start_escort(env, smoke)
                 else:
                     self._phase = self.SCANNING
                     self.vel = np.zeros(2)
@@ -549,7 +543,7 @@ class RouterGuide(Guide):
             ):
                 self._waypoints.clear()
                 if self._group:
-                    self._start_escort(env, smoke, civilians)
+                    self._start_escort(env, smoke)
                 else:
                     self._phase = self.SCANNING
                     self.vel = np.zeros(2)
@@ -560,7 +554,7 @@ class RouterGuide(Guide):
                 self._recruit_nearby(env, smoke, civilians)
                 # Re-check max_group after recruiting.
                 if len(self._group) >= self._effective_max_group():
-                    self._start_escort(env, smoke, civilians)
+                    self._start_escort(env, smoke)
 
     def _do_collecting(self, env, smoke, civilians):
         """Recruit civilians at the hotspot until full or timed out.
@@ -572,7 +566,7 @@ class RouterGuide(Guide):
         size.
         """
         if len(self._group) >= self._effective_max_group():
-            self._start_escort(env, smoke, civilians)
+            self._start_escort(env, smoke)
             return
 
         # Proactive danger detection on the current group.
@@ -605,7 +599,7 @@ class RouterGuide(Guide):
                         break
 
             if danger:
-                self._start_escort(env, smoke, civilians)
+                self._start_escort(env, smoke)
                 return
 
         self.vel = np.zeros(2)
@@ -618,7 +612,7 @@ class RouterGuide(Guide):
         if has_enough or timed_out:
             if self._group:
                 if len(self._group) >= self._min_group:
-                    self._start_escort(env, smoke, civilians)
+                    self._start_escort(env, smoke)
                 else:
                     # Small group. Check whether anyone nearby is worth
                     # waiting for, otherwise escort what we have.
@@ -627,11 +621,11 @@ class RouterGuide(Guide):
                         # No one nearby. Escort what we have. Duty of
                         # care over efficiency: never leave civilians
                         # attached to an idle guide waiting for more.
-                        self._start_escort(env, smoke, civilians)
+                        self._start_escort(env, smoke)
                     elif self._collect_wait >= self._max_collect_wait * 2:
                         # Still below min_group after two waits. Escort
                         # what we have rather than holding them longer.
-                        self._start_escort(env, smoke, civilians)
+                        self._start_escort(env, smoke)
             else:
                 # No civilians left at the collection point. Rescan.
                 self._blackboard.release(self._guide_id)
@@ -915,110 +909,11 @@ class RouterGuide(Guide):
         else:
             self._follow_path(env)
 
-    def _do_releasing(self, env, smoke=None):
-        """Wait at the exit for the group to arrive and escape."""
-        from evacsim.civilian import FOLLOWING_GUIDE, WANDERING
-
+    def _on_release_complete(self):
+        """Router rescans from the current position; no return phase."""
+        self._blackboard.release(self._guide_id)
+        self._phase = self.SCANNING
         self.vel = np.zeros(2)
-        self._release_wait += 1
-
-        still = []
-        for civ in self._group:
-            if civ.state != FOLLOWING_GUIDE:
-                continue
-            dist_exit = np.linalg.norm(civ.pos - np.array(self._escort_exit))
-            dist_guide = np.linalg.norm(civ.pos - self.pos)
-            if dist_exit < env.cell_size * 5 or dist_guide < env.cell_size * 3:
-                civ._set_exit_target_force(env, self._escort_exit)
-            else:
-                still.append(civ)
-        self._group = still
-
-        if not self._group or self._release_wait >= self._release_max_wait:
-            # On timeout, give stragglers an exit target rather than
-            # leaving them lost.
-            for civ in self._group:
-                if civ.state == FOLLOWING_GUIDE:
-                    civ._set_exit_target_force(env, self._escort_exit)
-            self._group.clear()
-            # Release the blackboard claim; the escort is complete.
-            self._blackboard.release(self._guide_id)
-            # Scan from the current position; no walking 'home'.
-            self._phase = self.SCANNING
-            self.vel = np.zeros(2)
-
-    def _do_returning(self, env, smoke=None, civilians=None):
-        """Return phase: scan for new hotspots while moving back.
-
-        If no waypoints, transition directly to SCANNING. Same
-        proactive danger handling as the other phases.
-        """
-        if not smoke or not civilians:
-            if not self._waypoints:
-                self._phase = self.SCANNING
-                self.vel = np.zeros(2)
-            else:
-                self._follow_path(env)
-            return
-
-        if len(self._group) >= self._effective_max_group():
-            self._start_escort(env, smoke, civilians)
-            return
-
-        # Proactive danger check.
-        if self._group:
-            danger = False
-            for civ in self._group:
-                if smoke.get_density_at(civ.pos[0], civ.pos[1]) > 0.3:
-                    danger = True
-                    break
-            if not danger:
-                sg = getattr(self, "_smoke_grid", None)
-                fg = getattr(self, "_fire_grid", None)
-                if sg is not None or fg is not None:
-                    gr, gc = env.world_to_grid(self.pos[0], self.pos[1])
-                    rows, cols = env.grid.shape
-                    for dr in range(-2, 3):
-                        for dc in range(-2, 3):
-                            nr, nc = gr + dr, gc + dc
-                            if 0 <= nr < rows and 0 <= nc < cols:
-                                if fg is not None and fg[nr, nc] > 0.1:
-                                    danger = True
-                                    break
-                                if sg is not None and sg[nr, nc] > 0.4:
-                                    danger = True
-                                    break
-                        if danger:
-                            break
-            if danger:
-                self._start_escort(env, smoke, civilians)
-                return
-
-        # Periodic hotspot scan while walking back. DBSCAN is O(n^2),
-        # so it runs only on the eval boundary, every 20 ticks.
-        if self._eval_counter == 0:
-            hotspot = self._find_hotspot(env, smoke, civilians)
-        else:
-            hotspot = None
-        if hotspot is not None:
-            fg = getattr(self, "_fire_grid", None)
-            sg = getattr(self, "_smoke_grid", None)
-            danger = self._build_solo_danger_grid(fg, sg)
-            self._waypoints = bfs_path(env, self.pos, hotspot, fire_grid=danger)
-            self._phase = self.RESPONDING
-            return
-
-        if not self._waypoints:
-            # No destination. Transition to scanning.
-            self._blackboard.release(self._guide_id)
-            self._phase = self.SCANNING
-            self.vel = np.zeros(2)
-        else:
-            self._follow_path(env)
-            self._recruit_nearby(env, smoke, civilians)
-            # Divert to escort only if the group meets the floor.
-            if len(self._group) >= self._min_group:
-                self._start_escort(env, smoke, civilians)
 
     def _find_hotspot(self, env, smoke, civilians):
         """Find the best hotspot via DBSCAN with an individual fallback.
@@ -1043,14 +938,6 @@ class RouterGuide(Guide):
         Skips clusters in fire or heavy smoke (unsafe to reach) and
         hotspots already claimed by other Routers.
         """
-        from evacsim.civilian import (
-            ESCAPED,
-            DEAD,
-            MOVING_TO_EXIT,
-            FOLLOWING_GUIDE,
-            QUEUED,
-        )
-
         # 1. Collect civilians needing help with a global scan.
         candidates = []
         for civ in civilians:
@@ -1210,104 +1097,7 @@ class RouterGuide(Guide):
                     return np.array(env.grid_to_world(nr, nc), dtype=float)
         return None
 
-    def _recruit_nearby(self, env, smoke, civilians):
-        """Recruit civilians within visual range, requiring line of sight."""
-        if len(self._group) >= self._effective_max_group():
-            return
-        radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            IDLE,
-            REACTING,
-            FOLLOWING_GUIDE,
-            QUEUED,
-        )
-
-        for civ in civilians:
-            if len(self._group) >= self._effective_max_group():
-                break
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                if civ.state == IDLE:
-                    civ.state = REACTING
-                    civ._reaction_counter = 0
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                elif civ.state == REACTING:
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    continue
-                else:
-                    self._group.append(civ)
-                    civ.assigned_guide = self
-                    civ.state = FOLLOWING_GUIDE
-
-    def _recruit_nearby_unlimited(self, env, smoke, civilians):
-        """Recruit any civilian within visual range during escort.
-
-        No group limit applies. Every civilian passed on the way to
-        the exit is picked up provided line of sight allows.
-        """
-        radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            IDLE,
-            REACTING,
-            FOLLOWING_GUIDE,
-            QUEUED,
-        )
-
-        for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE, QUEUED):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                if civ.state == IDLE:
-                    civ.state = REACTING
-                    civ._reaction_counter = 0
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                elif civ.state == REACTING:
-                    civ._reaction_delay = min(civ._reaction_delay, 5)
-                    continue
-                else:
-                    self._group.append(civ)
-                    civ.assigned_guide = self
-                    civ.state = FOLLOWING_GUIDE
-
-    def _count_recruitable(self, env, smoke, civilians):
-        """Count civilians actually recruitable by _recruit_nearby.
-
-        Uses identical visual-range and line-of-sight checks so the
-        count never reports false positives.
-        """
-        radius = self.get_visual_recruit_radius(smoke)
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            FOLLOWING_GUIDE,
-        )
-
-        count = 0
-        for civ in civilians:
-            if civ.state in (MOVING_TO_EXIT, ESCAPED, DEAD, FOLLOWING_GUIDE):
-                continue
-            if civ.assigned_guide is not None:
-                continue
-            dist = np.linalg.norm(civ.pos - self.pos)
-            if dist < radius and self._has_line_of_sight(civ.pos, env):
-                count += 1
-        return count
-
-    def _start_escort(self, env, smoke, civilians):
+    def _start_escort(self, env, smoke):
         """Plan a deliberative escort: predict spread, then choose path.
 
         Reactive component: uses current congestion data for exit
@@ -1453,14 +1243,6 @@ class RouterGuide(Guide):
         This gives the Router early congestion awareness even before
         civilians have explicitly chosen exits.
         """
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            QUEUED,
-            ESCAPED,
-            DEAD,
-            FOLLOWING_GUIDE,
-        )
-
         self._exit_counts = {(ex, ey): 0.0 for ex, ey in self.known_exits}
         for civ in civilians:
             if civ.state in (ESCAPED, DEAD):
@@ -1504,24 +1286,6 @@ class RouterGuide(Guide):
         elif sg is not None:
             return sg * 0.3
         return None
-
-    def _release_group_wandering(self):
-        """Release the group when the guide dies or self-evacuates."""
-        from evacsim.civilian import WANDERING, FOLLOWING_GUIDE
-
-        for civ in self._group:
-            if civ.state == FOLLOWING_GUIDE:
-                civ.assigned_guide = None
-                civ.state = WANDERING
-        self._group.clear()
-        # Release the blackboard claim.
-        self._blackboard.release(self._guide_id)
-
-    def _clean_group(self):
-        """Remove escaped or dead civilians from the group list."""
-        from evacsim.civilian import ESCAPED, DEAD
-
-        self._group = [c for c in self._group if c.state not in (ESCAPED, DEAD)]
 
 
 def spawn_router_guides(env, n_guides, speed=2.0, seed=77, n_civilians=100):

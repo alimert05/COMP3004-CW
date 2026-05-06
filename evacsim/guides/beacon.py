@@ -11,6 +11,14 @@ import numpy as np
 from evacsim.environment import Environment, CellType
 from evacsim.smoke import SmokeSystem
 from evacsim.fire import FireSystem
+from evacsim.civilian import (
+    MOVING_TO_EXIT,
+    ESCAPED,
+    DEAD,
+    IDLE,
+    REACTING,
+    FOLLOWING_GUIDE,
+)
 from evacsim.guides.base import Guide
 from evacsim.guides.common import bfs_path
 
@@ -120,15 +128,6 @@ class BeaconGuide(Guide):
         # Sound penetrates walls (no line-of-sight check) but attenuates
         # with distance and with smoke at both endpoints.
         max_range = self.broadcast_radius  # 100 units, ten cells.
-
-        from evacsim.civilian import (
-            MOVING_TO_EXIT,
-            ESCAPED,
-            DEAD,
-            IDLE,
-            REACTING,
-            FOLLOWING_GUIDE,
-        )
 
         exit_pos = (self.assigned_exit[0], self.assigned_exit[1])
 
