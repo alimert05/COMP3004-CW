@@ -24,13 +24,13 @@ class SimConfig:
     fire_spread_rate: float = 0.005
 
     # Simulation limits.
-    max_ticks: int = 6000  # Safety cap chosen from measure_saturation.py
-    # probe: worst-case smoke-damage coverage about
-    # 4,500 ticks, plus civilian death time (around
-    # 300 ticks at the damage threshold), plus a
-    # 1,200-tick safety buffer. Simulations almost
-    # always terminate via the all-resolved check
-    # well before this cap.
+    max_ticks: int = 6000  # Safety cap derived from a one-off
+    # saturation probe: worst-case smoke-damage
+    # coverage about 4,500 ticks, plus civilian
+    # death time (around 300 ticks at the damage
+    # threshold), plus a 1,200-tick safety buffer.
+    # Simulations almost always terminate via the
+    # all-resolved check well before this cap.
     seed: int = 42
 
     # Exit throughput: maximum civilians escaping per exit per tick.
@@ -38,9 +38,9 @@ class SimConfig:
 
 
 # Visual-mode settings used by test_map_visual.py only. These are not
-# read by experiments/runner.py or the debug tests, which construct
-# SimConfig objects directly. The VISUAL_ prefix marks the scope so
-# changes here do not affect the headless experiment.
+# read by experiments/runner.py, which constructs SimConfig objects
+# directly. The VISUAL_ prefix marks the scope so changes here do not
+# affect the headless experiment.
 
 VISUAL_CIVILIAN_NUMBER = 50
 VISUAL_GUIDE_POLICY = "router"  # "none", "beacon", "sweeper", "router"

@@ -71,7 +71,7 @@ class Guide:
 
         # Health is the worst of the two normalised damage ratios. When it
         # drops below the threshold the guide abandons its mission and
-        # heads for the nearest exit (40 percent health remaining).
+        # heads for the nearest exit (60 percent health remaining).
         self._health_threshold = 0.6
 
         # Self-evacuation state.

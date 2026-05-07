@@ -1,7 +1,8 @@
 """BeaconGuide: stationary broadcast policy.
 
-The guide walks to a position two to three cells in front of an
-assigned exit and broadcasts from there. Each tick, every civilian
+The guide walks to a position two cells in front of an assigned
+exit (falling back to one cell or the exit cell itself when blocked
+by walls) and broadcasts from there. Each tick, every civilian
 within hearing range rolls against a probabilistic hearing model
 that combines distance with listener-side and source-side smoke. On
 success the civilian either reacts sooner (if IDLE or REACTING) or
@@ -30,7 +31,9 @@ class BeaconGuide(Guide):
         1. On creation, assigned to a specific exit (round-robin in
            spawn_beacon_guides).
         2. Plans a BFS path from spawn to the beacon position.
-        3. Stands two to three cells in front of the exit and broadcasts.
+        3. Stands two cells in front of the exit (or one cell, or the
+           exit cell itself, if the preferred cell is blocked) and
+           broadcasts.
         4. Every tick, civilians within hearing range roll independently
            against a probabilistic hearing model. On success they receive
            the exit location.

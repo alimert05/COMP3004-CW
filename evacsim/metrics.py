@@ -10,7 +10,9 @@ Four primary outcome metrics are reported per run:
 
 Two additional fields are reported alongside:
 
-    evacuation_time  Tick at which the last civilian escaped or died.
+    evacuation_time  Tick at which the simulation ended (either all
+                     civilians were resolved or the tick cap was
+                     reached).
     survival_rate    TV divided by (TV + TM); the primary outcome.
 """
 

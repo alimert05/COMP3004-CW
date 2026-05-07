@@ -183,10 +183,12 @@ class RouterGuide(Guide):
     Routes civilians on the least-congested path to the least-congested
     exit, using forecast fire and smoke grids for both the dynamic
     commitment ceiling and the path-planning step. Each tick the guide
-    is in one of six phases:
+    is in one of five phases:
 
         1. SCANNING. Look for a hotspot of unhelped civilians using
-           DBSCAN. If none found, transition to RESPONDING.
+           DBSCAN. If one is found, transition to RESPONDING; otherwise
+           remain in SCANNING and (after several empty scans) fall back
+           to nearest-individual targeting.
         2. RESPONDING. Walk toward the chosen hotspot.
         3. COLLECTING. At the hotspot, recruit civilians within the
            visual range. Move to ESCORTING when the group is large
@@ -269,7 +271,7 @@ class RouterGuide(Guide):
         # Adaptive search: DBSCAN with an individual-civilian fallback
         # after several consecutive empty scans.
         self._no_cluster_count = 0
-        self._no_cluster_threshold = 3  # 3 empty scans x 20 ticks = 60 ticks.
+        self._no_cluster_threshold = 3  # Consecutive empty DBSCAN scans before fallback.
 
     def _effective_max_group(self) -> int:
         """Return the dynamic commitment ceiling for the current tick.

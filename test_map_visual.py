@@ -65,7 +65,7 @@ env = Environment(config)
 pygame.init()
 
 # Query the desktop size so the window fits on smaller screens.
-# Leave a 10% width margin and a 15% height margin to allow for the
+# Leave a 5% width margin and a 10% height margin to allow for the
 # taskbar and window chrome.
 display_info = pygame.display.Info()
 max_w = int(display_info.current_w * 0.95)

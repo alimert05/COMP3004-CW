@@ -12,7 +12,7 @@ and movement choices:
        direction (herding).
     5. Potency reaches zero: the agent dies.
 
-The finite-state machine has ten reachable states (IDLE, REACTING,
+The finite-state machine has nine reachable states (IDLE, REACTING,
 FLEEING_ROOM, WANDERING, WALL_FOLLOWING, FOLLOWING, FOLLOWING_GUIDE,
 MOVING_TO_EXIT, QUEUED) plus two terminal states (ESCAPED, DEAD).
 Damage from fire and smoke is applied every tick and the agent dies

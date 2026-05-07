@@ -1,8 +1,9 @@
 """Statistical analysis script for the evacuation factorial experiment.
 
 Reads results/experiment_results.csv and produces:
-    - Descriptive statistics at three aggregation levels (per policy,
-      policy by crowd, policy by map type).
+    - Descriptive statistics at four aggregation levels (per policy,
+      policy by crowd, policy by map type, and policy by individual
+      map for the heatmap).
     - One row per unique condition (480 conditions in the full design).
     - One-way and two-way ANOVA with effect sizes.
     - Tukey HSD pairwise comparisons with Cohen's d.
@@ -10,7 +11,7 @@ Reads results/experiment_results.csv and produces:
     - Box plots, line plots, heatmap, and bar charts.
 
 Metrics analysed:
-    survival_rate     TV / n_civilians, the primary outcome.
+    survival_rate     TV / (TV + TM), the primary outcome.
     MP                Mean potency of survivors at escape.
     MT                Mean evacuation time.
     guides_survived   Number of guides alive or successfully escaped.
