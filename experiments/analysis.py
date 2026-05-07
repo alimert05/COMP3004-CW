@@ -960,7 +960,7 @@ def main():
     else:
         print(
             "  (Evacuation curves skipped; bin columns missing from CSV. "
-            "Re-run experiments with the updated runner.)"
+            "Re-run experiments with experiments.runner.)"
         )
 
     # 5. Plain-text summary.

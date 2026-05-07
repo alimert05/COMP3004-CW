@@ -271,7 +271,9 @@ class RouterGuide(Guide):
         # Adaptive search: DBSCAN with an individual-civilian fallback
         # after several consecutive empty scans.
         self._no_cluster_count = 0
-        self._no_cluster_threshold = 3  # Consecutive empty DBSCAN scans before fallback.
+        self._no_cluster_threshold = (
+            3  # Consecutive empty DBSCAN scans before fallback.
+        )
 
     def _effective_max_group(self) -> int:
         """Return the dynamic commitment ceiling for the current tick.
@@ -450,9 +452,9 @@ class RouterGuide(Guide):
         elif not self._waypoints:
             # No hotspot found. Two cases:
             # 1. Safety net: civilians are still attached to this guide.
-            #    Escort them. Should not happen after _do_collecting
-            #    fixes, but guard anyway: never leave civilians as
-            #    passengers attached to an idle guide.
+            #    Should be unreachable in practice, but escort them
+            #    anyway - never leave civilians as passengers attached
+            #    to an idle guide.
             # 2. Mission complete: nobody anywhere needs help.
             #    Self-evacuate through the nearest exit.
             NEEDS_HELP = (
