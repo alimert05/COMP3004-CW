@@ -6,6 +6,8 @@ The project compares three guide policies — **Beacon**, **Sweeper**, and **Rou
 
 Developed as part of **COMP3004 Designing Intelligent Agents** at the **University of Nottingham**.
 
+[Read the full project report](paper/20587851_COMP3004_Report.pdf)
+
 ![Simulation demo](assets/demo.gif)
 
 *Router policy on a bottleneck map: civilians are coloured by state while fire and smoke spread; guide agents (orange diamonds) locate groups and escort them towards safe exits.*
@@ -512,6 +514,12 @@ The experiment also records evacuation counts in 500-tick intervals to support e
 
 ---
 
-## About
+## License
 
-Developed by **Ali Karaoglu** as part of **COMP3004 — Designing Intelligent Agents** at the **University of Nottingham**, academic year **2025/26**.
+Copyright © 2026 Ali Karaoglu. All rights reserved.
+
+This repository is made publicly available for portfolio and educational
+reference purposes. No permission is granted to copy, redistribute, submit,
+or reuse this work as academic coursework.
+
+Please respect your institution's academic integrity policies.
