@@ -1,249 +1,517 @@
-# COMP3004 — Evacuation Simulation
+# Multi-Agent Fire Evacuation Simulation
 
-An agent-based fire evacuation simulator that compares three guide agent
-policies (Beacon, Sweeper, Router) across a 14,400-run factorial experiment
-covering eight topologies, five fire positions, and three crowd sizes.
+An agent-based evacuation simulator for studying how different intelligent guide-agent strategies affect civilian survival in dynamic fire and smoke environments.
 
+The project compares three guide policies — **Beacon**, **Sweeper**, and **Router** — against a no-guide baseline across a **14,400-run controlled factorial experiment** spanning eight building topologies, five fire locations, three crowd sizes, and 30 paired trials per condition.
+
+Developed as part of **COMP3004 Designing Intelligent Agents** at the **University of Nottingham**.
 
 ![Simulation demo](assets/demo.gif)
 
-*Router policy on a bottleneck map: civilians (coloured by state)
-evacuate as fire and smoke spread; guides (orange diamonds) collect
-and escort groups to exits.*
+*Router policy on a bottleneck map: civilians are coloured by state while fire and smoke spread; guide agents (orange diamonds) locate groups and escort them towards safe exits.*
 
-## 1. Author
+---
 
-Ali Karaoglu (20587851)
-COMP3004 Designing Intelligent Agents — University of Nottingham
-Academic year 2025/2026
+## Key findings
 
-## 2. Policies at a glance
+Across the complete 14,400-run experiment, increasingly adaptive guide policies produced substantially higher civilian survival rates.
 
-- **Beacon** — passive broadcaster. Stands two cells inward from an
-  assigned exit and announces the exit to every civilian within
-  hearing range. Hearing probability decays with distance and with
-  smoke at both endpoints.
-- **Sweeper** — reactive patroller. Walks an assigned territory in
-  alternating-half order, recruits civilians visually within
-  line-of-sight, and escorts them to the nearest safe exit using
-  a three-layer Dijkstra → safety-validator → BFS path cascade.
-- **Router** — hybrid reactive-deliberative. Globally scans for
-  civilian clusters via DBSCAN, predicts fire and smoke spread 30
-  ticks ahead, routes through density-weighted Dijkstra paths, and
-  re-evaluates the destination exit every 20 ticks under a
-  multi-criteria score (distance, congestion, smoke, fire).
+| Policy | Strategy | Mean survival rate |
+|---|---|---:|
+| None | No guide agents | **38.8%** |
+| Beacon | Passive local broadcasting | **63.3%** |
+| Sweeper | Reactive patrol and escort | **78.4%** |
+| **Router** | **Hybrid reactive-deliberative coordination** | **82.8%** |
 
-## 3. Requirements
+Main findings:
 
-- Python 3.10 or newer (developed on 3.14.3)
+- **Router achieved the highest mean survival rate: 82.8%.**
+- Router was the **best-performing policy on all eight evaluated maps**.
+- Sweeper also performed strongly at **78.4%**, substantially outperforming Beacon.
+- The Router advantage over Sweeper was statistically significant, although the overall pairwise effect was small (**Cohen's d ≈ 0.26**).
+- Guide policy had a **large overall effect** on survival rate (**η² ≈ 0.339**).
+- Router achieved approximately **73.6% survival on bottleneck maps** and **92.1% on open-plan maps**, compared with **68.1%** and **88.8%** respectively for Sweeper.
+- Environmental structure mattered substantially: all policies performed better in open-plan layouts than in constrained bottleneck environments.
+
+The results suggest that increasingly sophisticated coordination and hazard-aware planning can improve evacuation outcomes, while also showing that much of the gain can already be achieved by a simpler reactive patrol-and-escort strategy.
+
+---
+
+## Agent policies
+
+### Beacon — passive communication
+
+Beacon agents are assigned to exits and move to fixed positions near them. They then broadcast exit information to nearby civilians.
+
+The probability that a civilian successfully receives the message decreases with:
+
+- distance from the guide,
+- smoke around the civilian,
+- smoke around the guide.
+
+Beacon represents a relatively simple communication-based intervention with little active planning.
+
+### Sweeper — reactive search and escort
+
+Sweeper agents actively patrol the environment, visually locate civilians, form groups, and escort them towards safe exits.
+
+The policy combines:
+
+- territory-based patrol,
+- visual line-of-sight recruitment,
+- dynamic group formation,
+- congestion-aware movement,
+- a **Dijkstra → safety validation → BFS** path-planning cascade,
+- reactive responses to current fire and smoke conditions.
+
+Sweeper provides a strong reactive baseline without using explicit future hazard prediction.
+
+### Router — hybrid reactive-deliberative planning
+
+Router is the most sophisticated policy in the simulation.
+
+Each Router agent:
+
+1. scans globally for civilian clusters using **DBSCAN**,
+2. coordinates with other Routers through a shared blackboard,
+3. claims rescue hotspots to reduce duplicated work,
+4. forecasts future fire and smoke spread,
+5. evaluates exits using distance, congestion and hazard information,
+6. follows density-aware Dijkstra paths,
+7. collects nearby civilians into groups,
+8. continuously tracks incoming traffic at exits,
+9. periodically re-evaluates the destination while escorting civilians.
+
+The shared blackboard maintains:
+
+- hotspot claims,
+- live guide positions,
+- exit claims and expected incoming civilians.
+
+This allows the guides to spread themselves across the environment and reduce unnecessary overlap and exit congestion.
+
+---
+
+## Simulation environment
+
+The simulator models evacuation inside a 2D grid environment containing:
+
+- civilians,
+- guide agents,
+- walls and rooms,
+- multiple exits,
+- spreading fire,
+- spreading smoke,
+- health degradation,
+- stochastic civilian behaviour,
+- exit queues and throughput limits.
+
+Fire and smoke are modelled using cellular-automaton-style propagation.
+
+Civilian behaviour includes several states such as reacting, wandering, following guides, moving towards exits, queueing, escaping, and dying.
+
+One simulation tick corresponds approximately to one second of simulated time.
+
+---
+
+## Experimental design
+
+The main experiment uses a full factorial design:
+
+```text
+8 maps
+× 5 fire positions
+× 4 policies
+× 3 crowd sizes
+× 30 trials
+= 14,400 simulation runs
+```
+
+### Maps
+
+Eight `36 × 80` environments are included.
+
+**Bottleneck layouts**
+
+- `bottleneck_A`
+- `bottleneck_B`
+- `bottleneck_C`
+- `bottleneck_D`
+
+**Open-plan layouts**
+
+- `open_plan_A`
+- `open_plan_B`
+- `open_plan_C`
+- `open_plan_D`
+
+The maps cover structures including narrow doorways, corridors, asymmetric exit placement, open warehouses, cubicle-like partitions and funnelled exit layouts.
+
+### Fire positions
+
+Each topology is evaluated with fire originating from:
+
+- centre,
+- top-left,
+- top-right,
+- bottom-left,
+- bottom-right.
+
+### Crowd sizes
+
+Three crowd sizes are tested:
+
+- 50 civilians,
+- 100 civilians,
+- 150 civilians.
+
+Four guide agents are used for the three active-guide policies.
+
+### Policies
+
+Four experimental conditions are compared:
+
+- `none`
+- `beacon`
+- `sweeper`
+- `router`
+
+---
+
+## Statistical analysis
+
+The analysis pipeline evaluates both overall policy performance and interactions with environmental conditions.
+
+It produces:
+
+- descriptive statistics with 95% confidence intervals,
+- one-way ANOVA,
+- two-way ANOVA for:
+  - policy × map type,
+  - policy × crowd size,
+  - policy × fire position,
+- partial η² effect sizes,
+- Tukey HSD pairwise comparisons,
+- Cohen's d effect sizes,
+- per-map comparisons,
+- cumulative evacuation statistics,
+- policy summary tables.
+
+The primary outcome is **civilian survival rate**:
+
+```text
+survival_rate = escaped / (escaped + dead)
+```
+
+For the complete experiment, policy had a large effect on survival:
+
+```text
+F ≈ 2457.6
+p < 0.001
+η² ≈ 0.339
+```
+
+The complete generated results are stored under `results/`.
+
+---
+
+## Requirements
+
+- Python **3.10+**
 - Packages listed in `requirements.txt`
 
-Install with:
+Install dependencies with:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 4. Smoke test
+---
 
-Verify the full pipeline works end-to-end with a 4-run sanity check
-(approximately 45 seconds on a modern 8-core machine):
+## Quick smoke test
+
+A small four-run experiment can be used to verify the complete simulation pipeline:
 
 ```bash
 python -m experiments.runner --smoke
 ```
 
-This runs one simulation per policy on `bottleneck_A` at crowd size 100,
-streams results to `results/experiment_results.csv`, and exits.
+This runs one simulation for each policy on `bottleneck_A` with a crowd of 100 civilians.
 
-## 5. Visual demo
+Approximate runtime on a modern 8-core machine:
 
-Run the simulation with a Pygame window showing civilians, guides, fire,
-and smoke in real time:
+```text
+~45 seconds
+```
+
+---
+
+## Visual demo
+
+Launch an interactive Pygame simulation with:
 
 ```bash
 python test_map_visual.py
 ```
 
-The map file and policy are selected via `VISUAL_*` constants at the bottom
-of `config.py`. Change `VISUAL_GUIDE_POLICY` to `"none"`, `"beacon"`,
-`"sweeper"`, or `"router"` to see different policies, and
-`VISUAL_CIVILIAN_NUMBER` to vary crowd size.
+The visualisation displays:
 
-## 6. Reproducing the experiment
+- civilians and their current states,
+- guide agents,
+- walls and exits,
+- active fire,
+- smoke propagation.
 
-The full factorial (8 maps × 5 fire positions × 4 policies × 3 crowd sizes
-× 30 trials = 14,400 runs):
+The visual configuration can be changed through the `VISUAL_*` constants in `config.py`.
+
+For example:
+
+```python
+VISUAL_GUIDE_POLICY = "router"
+VISUAL_CIVILIAN_NUMBER = 100
+```
+
+Available guide settings are:
+
+```text
+none
+beacon
+sweeper
+router
+```
+
+---
+
+## Running the experiment
+
+### Smoke test
+
+```bash
+python -m experiments.runner --smoke
+```
+
+4 runs.
+
+### Pilot experiment
+
+```bash
+python -m experiments.runner --pilot
+```
+
+960 runs.
+
+### Full experiment
 
 ```bash
 python -m experiments.runner
 ```
 
-Results stream to `results/experiment_results.csv` as each run completes
-(one row per run), so a crash preserves every completed run on disk.
+14,400 runs.
 
-Alternative modes:
+### Single policy
 
-| Mode          | Command                                                    | Runs   |
-|---------------|------------------------------------------------------------|--------|
-| Smoke         | `python -m experiments.runner --smoke`                     | 4      |
-| Pilot         | `python -m experiments.runner --pilot`                     | 960    |
-| Full          | `python -m experiments.runner`                             | 14,400 |
-| Single policy | `python -m experiments.runner --policy router`             | 3,600  |
-| Single map    | `python -m experiments.runner --map maps/bottleneck_A.txt` | 1,800  |
+```bash
+python -m experiments.runner --policy router
+```
 
-Worker count defaults to 8; override with `--workers N`.
+3,600 runs.
 
-## 7. Performance notes
+### Single map
+
+```bash
+python -m experiments.runner --map maps/bottleneck_A.txt
+```
+
+1,800 runs.
+
+The default worker count is 8 and can be overridden with:
+
+```bash
+python -m experiments.runner --workers N
+```
+
+Results are streamed to:
+
+```text
+results/experiment_results.csv
+```
+
+Each completed simulation is written immediately, so previously completed runs remain available if a long experiment is interrupted.
+
+---
+
+## Performance
 
 Approximate wall-clock times on an 8-core machine:
 
-| Mode  | Runs   | Time        |
-|-------|--------|-------------|
-| Smoke | 4      | ~45 sec     |
-| Pilot | 960    | ~30 min     |
-| Full  | 14,400 | ~7-8 hours  |
+| Mode | Runs | Approx. runtime |
+|---|---:|---:|
+| Smoke | 4 | ~45 sec |
+| Pilot | 960 | ~30 min |
+| Full | 14,400 | ~7–8 hours |
 
-Per-run CPU cost scales with policy complexity and crowd size; Router at
-n = 150 civilians is the slowest configuration. Disk output for the full
-run is approximately 2 MB.
+Runtime varies with policy complexity and crowd size. Router with 150 civilians is the most computationally expensive configuration.
 
-## 8. Reproducibility
+The complete experimental CSV is approximately 2 MB.
 
-The 14,400-run dataset in `results/experiment_results.csv` is fully
-reproducible:
+---
 
-- Seeds are derived deterministically from the trial index via
-  `zlib.crc32`, which is stable across processes, Python versions,
-  and operating systems.
-- A re-run of `python -m experiments.runner` produces the same numbers
-  byte for byte.
-- The seed scheme is fully paired across factorial conditions: trial N
-  represents the same civilian cohort under every (map, fire, policy,
-  crowd) combination, so within-cell and across-cell comparisons are
-  matched on stochastic noise.
+## Reproducibility
 
-## 9. Reproducing the analysis
+The experiment uses deterministic seeds derived from the trial index using `zlib.crc32`.
 
-After `results/experiment_results.csv` exists, generate all statistical
-tables and figures:
+The same trial index is reused across experimental conditions, creating a paired/randomised-block design:
+
+```text
+trial N
+├── same stochastic civilian cohort
+├── same underlying random seed
+├── evaluated on each policy
+└── evaluated across map, crowd and fire conditions
+```
+
+This reduces noise when comparing policies because corresponding trials are matched on the same stochastic seed.
+
+The experiment results included in this repository contain all 14,400 runs.
+
+---
+
+## Reproducing the analysis
+
+Once `results/experiment_results.csv` exists, run:
 
 ```bash
 python -m experiments.analysis
 ```
 
-Outputs are written to `results/analysis/` by default. Override with
-`--input` or `--output`.
+Analysis outputs are written to:
 
-The analysis produces:
-
-- One-way ANOVA on policy (survival rate)
-- Two-way ANOVA on policy × map_type, policy × n_civilians, policy × fire_position
-- Partial η² effect sizes
-- Pairwise Tukey HSD for policy contrasts, with Cohen's d
-- Box plots, line charts, policy × map heatmap
-- Per-policy summary CSVs
-
-## 10. Configuration
-
-Key `SimConfig` fields (in `config.py`):
-
-| Field               | Default                       | Purpose                                                            |
-|---------------------|-------------------------------|--------------------------------------------------------------------|
-| `map_file`          | `"maps/bottleneck_A.txt"`     | Map file path                                                      |
-| `cell_size`         | `10.0`                        | World units per grid cell (≈ 3 m)                                  |
-| `fire_position`     | `"center"`                    | One of `center`, `top_left`, `top_right`, `bottom_left`, `bottom_right` |
-| `n_civilians`       | `50`                          | Number of civilians spawned                                        |
-| `civilian_speed`    | `1.5`                         | Civilian movement, world units per tick                            |
-| `guide_policy`      | `"beacon"`                    | One of `none`, `beacon`, `sweeper`, `router`                       |
-| `n_guides`          | `4`                           | Number of guides spawned                                           |
-| `guide_speed`       | `2.0`                         | Guide movement, world units per tick                               |
-| `smoke_spread_rate` | `0.02`                        | Per-tick spread coefficient for the smoke CA                       |
-| `fire_spread_rate`  | `0.005`                       | Per-tick spread coefficient for the fire CA                        |
-| `max_ticks`         | `6000`                        | Hard simulation cap                                                |
-| `seed`              | `42`                          | RNG seed for the run                                               |
-| `exit_throughput`   | `2`                           | Maximum civilians escaping per exit per tick                       |
-
-## 11. Map file format
-
-Maps in `maps/*.txt` are plain ASCII grids using one character per cell:
-
-| Character | Meaning                                              |
-|-----------|------------------------------------------------------|
-| `.`       | Floor (walkable)                                     |
-| `#`       | Wall                                                 |
-| `E`       | Exit                                                 |
-| `F`       | Fire source (overridden by `fire_position` in config) |
-
-A 36×80 map is 36 lines of 80 characters each. Lines shorter than the
-maximum row are padded with walls. Every map in the experiment has
-four exits.
-
-## 12. Output format
-
-Each row in `results/experiment_results.csv` represents one simulation run.
-
-Key columns:
-
-| Column              | Meaning                                                                       |
-|---------------------|-------------------------------------------------------------------------------|
-| `map`               | Map file path                                                                 |
-| `fire_position`     | Fire origin (`center`, `top_left`, `top_right`, `bottom_left`, `bottom_right`) |
-| `policy`            | `none`, `beacon`, `sweeper`, `router`                                         |
-| `n_civilians`       | Crowd size (50, 100, or 150)                                                  |
-| `trial`             | Trial index within the (map, fire, policy, crowd) cell                        |
-| `seed`              | Deterministic seed derived from `trial`                                       |
-| `TV`                | Total alive: civilians who escaped (Kasereka 2018)                            |
-| `TM`                | Total dead: civilians killed by fire or smoke (Kasereka 2018)                 |
-| `MP`                | Mean potency (remaining health) of survivors at escape                        |
-| `MT`                | Mean time to escape, in ticks                                                 |
-| `survival_rate`     | `TV / (TV + TM)` — primary outcome metric                                     |
-| `evacuation_time`   | Tick when the last civilian resolved (escaped or died)                        |
-| `still_alive`       | Civilians neither escaped nor dead at `max_ticks` (usually 0)                 |
-| `n_guides`          | Number of guides spawned (fixed at 4)                                         |
-| `guides_survived`   | Guides alive or successfully escaped at end of run                            |
-| `escaped_{lo}_{hi}` | Civilians who escaped in that 500-tick window (12 bins, 0–6000)               |
-
-One simulation tick corresponds to roughly one second of simulated time.
-
-## 13. File layout
-
+```text
+results/analysis/
 ```
-COMP3004-CW/
-├── README.md                  This file
-├── requirements.txt           Python dependencies
-├── config.py                  SimConfig dataclass
-├── test_headless.py           Single-run headless test
-├── test_map_visual.py         Pygame visual mode
+
+This includes statistical summaries, ANOVA outputs, Tukey comparisons, effect sizes and per-condition results.
+
+Custom paths can also be supplied through the analysis command-line arguments.
+
+---
+
+## Configuration
+
+The central simulation parameters are defined by `SimConfig` in `config.py`.
+
+| Field | Default | Purpose |
+|---|---:|---|
+| `map_file` | `maps/bottleneck_A.txt` | Environment map |
+| `cell_size` | `10.0` | World units per grid cell |
+| `fire_position` | `center` | Fire origin |
+| `n_civilians` | `50` | Number of civilians |
+| `civilian_speed` | `1.5` | Civilian movement speed |
+| `guide_policy` | `beacon` | Guide strategy |
+| `n_guides` | `4` | Number of guides |
+| `guide_speed` | `2.0` | Guide movement speed |
+| `smoke_spread_rate` | `0.02` | Smoke propagation coefficient |
+| `fire_spread_rate` | `0.005` | Fire propagation coefficient |
+| `max_ticks` | `6000` | Simulation time limit |
+| `seed` | `42` | RNG seed |
+| `exit_throughput` | `2` | Civilians exiting per exit per tick |
+
+---
+
+## Map format
+
+Maps under `maps/` use a simple ASCII representation:
+
+| Character | Meaning |
+|---|---|
+| `.` | Walkable floor |
+| `#` | Wall |
+| `E` | Exit |
+| `F` | Fire source |
+
+Each experimental map contains four exits.
+
+---
+
+## Output data
+
+Each row in `results/experiment_results.csv` corresponds to one simulation run.
+
+Important columns include:
+
+| Column | Description |
+|---|---|
+| `map` | Environment |
+| `fire_position` | Fire origin |
+| `policy` | Guide policy |
+| `n_civilians` | Crowd size |
+| `trial` | Trial index |
+| `seed` | Deterministic RNG seed |
+| `TV` | Civilians successfully evacuated |
+| `TM` | Civilians killed by fire or smoke |
+| `MP` | Mean remaining health of survivors |
+| `MT` | Mean evacuation time |
+| `survival_rate` | Primary outcome |
+| `evacuation_time` | Time at which the final civilian resolves |
+| `still_alive` | Unresolved civilians at the simulation limit |
+| `guides_survived` | Guide survival count |
+
+The experiment also records evacuation counts in 500-tick intervals to support evacuation-curve analysis.
+
+---
+
+## Project structure
+
+```text
+.
+├── README.md
+├── requirements.txt
+├── config.py
+├── test_headless.py
+├── test_map_visual.py
+│
 ├── evacsim/
-│   ├── environment.py         Grid, walls, exits, map loader
-│   ├── smoke.py               Smoke cellular automaton
-│   ├── fire.py                Fire cellular automaton
-│   ├── civilian.py            Civilian agent
-│   ├── simulation.py          Simulation engine
-│   ├── metrics.py             Metric collector (TV/TM/MP/MT)
-│   ├── guide.py               Thin shim re-exporting guide classes
+│   ├── environment.py
+│   ├── smoke.py
+│   ├── fire.py
+│   ├── civilian.py
+│   ├── simulation.py
+│   ├── metrics.py
 │   └── guides/
-│       ├── common.py          BFS, Dijkstra, DBSCAN, predict_spread
-│       ├── base.py            Guide base class
-│       ├── beacon.py          BeaconGuide
-│       ├── sweeper.py         SweeperGuide
-│       └── router.py          RouterGuide + RouterBlackboard
+│       ├── base.py
+│       ├── common.py
+│       ├── beacon.py
+│       ├── sweeper.py
+│       └── router.py
+│
 ├── experiments/
-│   ├── runner.py              Factorial runner (14,400 runs)
-│   └── analysis.py            ANOVA, Tukey, figures
-├── maps/                      8 map files (bottleneck A-D, open_plan A-D)
-└── results/                   Experiment output (CSV + analysis)
+│   ├── runner.py
+│   └── analysis.py
+│
+├── maps/
+│   ├── bottleneck_A.txt
+│   ├── ...
+│   └── open_plan_D.txt
+│
+├── results/
+│   ├── experiment_results.csv
+│   └── analysis/
+│
+└── assets/
+    └── demo.gif
 ```
 
-## 14. Platform notes
+---
 
-- **Windows**: multiprocessing in `experiments/runner.py` is already
-  guarded with `if __name__ == "__main__":`. No extra action needed.
-- **Linux / macOS**: use `python3` in place of `python` if the system
-  default interpreter is Python 2.
-- **Headless systems**: `experiments/analysis.py` sets
-  `matplotlib.use("Agg")`, so it works without a display.
-- **Pygame on Linux**: if the visual demo fails to open a window, install
-  SDL2 development headers (for example, `apt install libsdl2-dev` on
-  Debian-based distributions).
+## Platform notes
+
+- **Windows:** multiprocessing is protected by `if __name__ == "__main__":`.
+- **Linux / macOS:** use `python3` instead of `python` where required.
+- **Headless systems:** the analysis pipeline uses Matplotlib's `Agg` backend and does not require a display.
+- **Linux visual mode:** Pygame may require system SDL2 development libraries.
+
+---
+
+## About
+
+Developed by **Ali Karaoglu** as part of **COMP3004 — Designing Intelligent Agents** at the **University of Nottingham**, academic year **2025/26**.
